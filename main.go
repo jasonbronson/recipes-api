@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -25,6 +26,27 @@ var recipeCache *cache.Cache
 var recipesCache *cache.Cache
 
 func main() {
+	versionFlag := flag.Bool("version", false, "Print the version of the application")
+	flag.Parse()
+
+	// Get version of app
+	versionFile, err := os.Open("latest-version.txt")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer versionFile.Close()
+	versionBytes, err := io.ReadAll(versionFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println("Version:", string(versionBytes))
+
+	// Check if the version flag is set
+	if *versionFlag {
+		fmt.Println(string(versionBytes))
+		return
+	}
+
 	// Initialize both caches
 	recipeCache = cache.New(30*24*time.Hour, 1*time.Hour)
 	recipesCache = cache.New(1*time.Hour, 10*time.Minute)

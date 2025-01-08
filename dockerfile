@@ -25,10 +25,13 @@ WORKDIR /usr/local/bin
 # Copy Go app binary and schema.json
 COPY --from=builder /tmp/myapp .
 COPY --from=builder /app/schema.json .
+COPY --from=builder /app/latest-version.txt .
+COPY --from=builder /app/checklatestversion.sh .
 
 # Add a script to manage both processes
 COPY entrypoint.sh .
 RUN chmod +x entrypoint.sh
+RUN chmod +x checklatestversion.sh
 
 # Expose necessary ports
 EXPOSE 8080

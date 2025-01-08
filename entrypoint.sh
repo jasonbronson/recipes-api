@@ -1,7 +1,7 @@
 #!/bin/sh
 
-# Start the Go app in the background
-/usr/local/bin/myapp &
+# Run the check for the latest version
+/app/checklatestversion.sh
 
 # Start Cloudflare Tunnel
 cloudflared tunnel --url http://localhost:8080
