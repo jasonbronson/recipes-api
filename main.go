@@ -30,7 +30,7 @@ func main() {
 	recipesCache = cache.New(1*time.Hour, 10*time.Minute)
 
 	if err := godotenv.Load(); err != nil {
-		log.Fatal("Error loading .env file:", err)
+		log.Println("Error loading .env file:", err)
 	}
 
 	router := gin.Default()
