@@ -1,0 +1,58 @@
+{
+  "name": "recipe_response",
+  "strict": true,
+  "schema": {
+    "type": "object",
+    "properties": {
+      "title": {
+        "type": "string"
+      },
+      "date": {
+        "type": "string"
+      },
+      "image": {
+        "type": "string"
+      },
+      "prepTime": {
+        "type": "integer"
+      },
+      "cookTime": {
+        "type": "integer"
+      },
+      "totalTime": {
+        "type": "integer"
+      },
+      "servings": {
+        "type": "integer"
+      },
+      "category": {
+        "type": "string"
+      },
+      "ingredients": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "instructions": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "required": [
+      "title",
+      "date",
+      "image",
+      "prepTime",
+      "cookTime",
+      "totalTime",
+      "servings",
+      "ingredients",
+      "instructions",
+      "category"
+    ],
+    "additionalProperties": false
+  }
+}
