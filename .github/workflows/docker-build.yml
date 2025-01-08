@@ -64,3 +64,5 @@ jobs:
           asset_path: ./output/myapp
           asset_name: myapp
           asset_content_type: application/octet-stream
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
