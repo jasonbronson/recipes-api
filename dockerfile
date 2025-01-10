@@ -19,9 +19,6 @@ RUN apk add --no-cache curl
 RUN curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
     -o /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared
 
-# Set working directory
-WORKDIR /usr/local/bin
-
 # Copy Go app binary and schema.json
 COPY --from=builder /tmp/myapp .
 COPY --from=builder /app/schema.json .
