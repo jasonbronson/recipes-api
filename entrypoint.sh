@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # Run the check for the latest version
-/app/checklatestversion.sh
+/app/checklatestversion.sh &
 
 # Start Cloudflare Tunnel
 /app/cloudflared tunnel --url http://localhost:8080
