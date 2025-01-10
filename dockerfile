@@ -19,16 +19,18 @@ RUN apk add --no-cache curl
 RUN curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
     -o /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared
 
+WORKDIR /app
+
 # Copy Go app binary and schema.json
-COPY --from=builder /tmp/myapp .
-COPY --from=builder /app/schema.json .
-COPY --from=builder /app/latest-version.txt .
-COPY --from=builder /app/checklatestversion.sh .
+COPY --from=builder /tmp/myapp /app/
+COPY --from=builder /app/schema.json /app/
+COPY --from=builder /app/latest-version.txt /app/
+COPY --from=builder /app/checklatestversion.sh /app/
 
 # Add a script to manage both processes
-COPY entrypoint.sh .
-RUN chmod +x entrypoint.sh
-RUN chmod +x checklatestversion.sh
+COPY entrypoint.sh /app/
+RUN chmod +x /app/entrypoint.sh
+RUN chmod +x /app/checklatestversion.sh
 
 # Expose necessary ports
 EXPOSE 8080
