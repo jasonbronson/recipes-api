@@ -5,6 +5,7 @@ FROM golang:1.22.5-alpine as builder
 ENV CGO_ENABLED=0 GOOS=linux
 
 # Build Go app
+RUN mkdir /app
 WORKDIR /app
 COPY . .
 RUN go build -o /tmp/myapp .
@@ -12,14 +13,15 @@ RUN go build -o /tmp/myapp .
 # Base image for the final container
 FROM alpine:latest
 
+RUN mkdir /app
+
 # Install dependencies for cloudflared
 RUN apk add --no-cache curl
 
+WORKDIR /app
 # Download and install Cloudflare Tunnel
 RUN curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
-    -o /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared
-
-WORKDIR /app
+    -o /app/cloudflared && chmod +x /app/cloudflared
 
 # Copy Go app binary and schema.json
 COPY --from=builder /tmp/myapp /app/
