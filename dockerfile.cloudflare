@@ -1,0 +1,22 @@
+FROM debian:bullseye-slim
+
+# Set environment variables
+ENV TUNNEL_TOKEN=""
+
+# Install required dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download and install cloudflared
+RUN curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+    -o /usr/local/bin/cloudflared && \
+    chmod +x /usr/local/bin/cloudflared
+
+# Expose default cloudflared port
+EXPOSE 7844
+
+# Entry point to run the tunnel
+ENTRYPOINT ["cloudflared"]
+CMD ["tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:7844", "run"]
