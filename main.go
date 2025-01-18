@@ -229,7 +229,8 @@ func main() {
 }
 
 func getRecipe(url string) (Recipe, string) {
-	u := launcher.New().MustLaunch()
+	binPath := "/usr/bin/chromium"
+	u := launcher.New().Bin(binPath).MustLaunch()
 
 	// Connect to the browser
 	browser := rod.New().ControlURL(u).MustConnect()
