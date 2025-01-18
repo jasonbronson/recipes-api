@@ -154,8 +154,14 @@ func main() {
 
 		// Try to get from cache first
 		if cachedRecipes, found := recipesCache.Get("all_recipes"); found {
+			allRecipes, ok := cachedRecipes.([]Recipe)
+			if !ok {
+				log.Println("Cache data type mismatch")
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Cache data invalid"})
+				return
+			}
+
 			log.Println("Cache hit for all recipes")
-			allRecipes := cachedRecipes.([]Recipe)
 
 			// Filter recipes by category if specified
 			if category != "" {
@@ -268,7 +274,7 @@ func getRecipe(url string) (Recipe, string) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Println("Failed to download image: %s", resp.Status)
+		log.Printf("Failed to download image: %s \n", resp.Status)
 	}
 
 	// Read the image data
