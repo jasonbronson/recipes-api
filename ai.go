@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/sashabaranov/go-openai"
 )
 
@@ -134,7 +135,7 @@ func (c *Client) ValidateImage(title, image string) (bool, error) {
 				Content: fmt.Sprintf(`{"title": %q, "image": %q}`, title, image),
 			},
 		},
-		MaxTokens:   50,
+		MaxTokens:   16000,
 		Temperature: 0,
 		ResponseFormat: &openai.ChatCompletionResponseFormat{
 			Type: openai.ChatCompletionResponseFormatTypeJSONSchema,
@@ -147,9 +148,9 @@ func (c *Client) ValidateImage(title, image string) (bool, error) {
 	}
 
 	// Debug logging
-	if c.debug {
-		log.Printf("Request: %+v\n", req)
-	}
+	//if c.debug {
+	//	log.Printf("Request: %+v\n", req)
+	//}
 
 	// Send the request
 	resp, err := c.client.CreateChatCompletion(ctx, req)
@@ -170,6 +171,7 @@ func (c *Client) ValidateImage(title, image string) (bool, error) {
 		if err := json.Unmarshal([]byte(resp.Choices[0].Message.Content), &result); err != nil {
 			return false, fmt.Errorf("failed to parse response: %w", err)
 		}
+		spew.Dump(resp.Choices)
 	}
 
 	return result.Matches, nil

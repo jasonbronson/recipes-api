@@ -307,10 +307,10 @@ func getRecipe(url string) (Recipe, string) {
 	log.Printf("Filename for json: %s", filename)
 
 	// Check if image matches title
+	imageFilename := fmt.Sprintf("images/%s.jpg", strings.ToLower(strings.ReplaceAll(title, " ", "-")))
 	for _, image := range imageList {
 		if matchImage(title, image) {
 			// Upload the image to S3
-			imageFilename := fmt.Sprintf("images/%s.jpg", strings.ToLower(strings.ReplaceAll(title, " ", "-")))
 			if err := s3Client.UploadImage(imageFilename, "image/jpeg", image); err != nil {
 				log.Fatal("Error uploading image to S3:", err)
 			}

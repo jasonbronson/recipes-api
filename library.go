@@ -14,7 +14,6 @@ func matchImage(title string, imageData []byte) bool {
 	openaiKey := os.Getenv("OPENAI_KEY")
 	format := "text"
 	ai := NewClient(openaiKey, "gpt-4o", format, false)
-
 	// Encode the image data to base64
 	imageBase64 := base64.StdEncoding.EncodeToString(imageData)
 	promptWithImage := fmt.Sprintf(" Image Data (base64): %s ", imageBase64)
@@ -36,6 +35,7 @@ func downloadImages(images []string) [][]byte {
 
 	// Download the images
 	for _, imageContent := range images {
+		log.Println("Downloading image:", imageContent)
 		resp, err := http.Get(imageContent)
 		if err != nil {
 			log.Println("Error downloading image:", err)
