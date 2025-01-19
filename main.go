@@ -60,6 +60,10 @@ func main() {
 
 	// Add CORS middleware
 	router.Use(func(c *gin.Context) {
+		if c.Request.URL.Path == "/metrics" {
+			c.Next()
+			return
+		}
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
