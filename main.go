@@ -231,6 +231,9 @@ func main() {
 
 func getRecipe(url string) (Recipe, string) {
 	binPath := "/usr/bin/chromium"
+	if os.Getenv("LOCAL") == "true" {
+		binPath = "/opt/homebrew/bin/chromium"
+	}
 	u := launcher.New().Bin(binPath).MustLaunch()
 
 	// Connect to the browser
@@ -304,24 +307,19 @@ func getRecipe(url string) (Recipe, string) {
 	log.Printf("Filename for json: %s", filename)
 
 	// Check if image matches title
-	var imageData []byte
 	for _, image := range imageList {
 		if matchImage(title, image) {
-			imageData = []byte{image}
+			// Upload the image to S3
+			imageFilename := fmt.Sprintf("images/%s.jpg", strings.ToLower(strings.ReplaceAll(title, " ", "-")))
+			if err := s3Client.UploadImage(imageFilename, "image/jpeg", image); err != nil {
+				log.Fatal("Error uploading image to S3:", err)
+			}
+			responseRecipe.Image = fmt.Sprintf("https://cookingimage.bronson.dev/%s", imageFilename)
+			log.Printf("image uploaded to s3 %s", imageFilename)
 			break
 		}
 	}
-
-	// Upload the image to S3
-	if imageData != nil {
-		imageFilename := fmt.Sprintf("images/%s.jpg", strings.ToLower(strings.ReplaceAll(title, " ", "-")))
-		if err := s3Client.UploadImage(imageFilename, "image/jpeg", imageData); err != nil {
-			log.Fatal("Error uploading image to S3:", err)
-		}
-		responseRecipe.Image = fmt.Sprintf("https://cookingimage.bronson.dev/%s", imageFilename)
-	}
 	responseRecipe.OriginalURL = url
-
 	return responseRecipe, filename
 }
 

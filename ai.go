@@ -107,6 +107,79 @@ func (c *Client) Prompt(prompt, systemPrompt string, maxTokens int) (*Response, 
 	return &response, nil
 }
 
+func (c *Client) ValidateImage(title, image string) (bool, error) {
+	ctx := context.Background()
+
+	// Define the JSON schema for enforcing a boolean response with additionalProperties set to false
+	schemaJSON := `{
+		"type": "object",
+		"properties": {
+			"matches": {
+				"type": "boolean"
+			}
+		},
+		"required": ["matches"],
+		"additionalProperties": false
+	}`
+
+	req := openai.ChatCompletionRequest{
+		Model: c.engine,
+		Messages: []openai.ChatCompletionMessage{
+			{
+				Role:    openai.ChatMessageRoleSystem,
+				Content: "You are an assistant validating if an image title matches its content. Respond only with a JSON object containing a boolean field 'matches'.",
+			},
+			{
+				Role:    openai.ChatMessageRoleUser,
+				Content: fmt.Sprintf(`{"title": %q, "image": %q}`, title, image),
+			},
+		},
+		MaxTokens:   50,
+		Temperature: 0,
+		ResponseFormat: &openai.ChatCompletionResponseFormat{
+			Type: openai.ChatCompletionResponseFormatTypeJSONSchema,
+			JSONSchema: &openai.ChatCompletionResponseFormatJSONSchema{
+				Name:   "image_validation",
+				Schema: json.RawMessage(schemaJSON),
+				Strict: true,
+			},
+		},
+	}
+
+	// Debug logging
+	if c.debug {
+		log.Printf("Request: %+v\n", req)
+	}
+
+	// Send the request
+	resp, err := c.client.CreateChatCompletion(ctx, req)
+	if err != nil {
+		return false, err
+	}
+
+	if c.debug {
+		log.Printf("Response: %+v\n", resp)
+	}
+
+	// Parse the response into a struct
+	var result struct {
+		Matches bool `json:"matches"`
+	}
+
+	if len(resp.Choices) > 0 {
+		if err := json.Unmarshal([]byte(resp.Choices[0].Message.Content), &result); err != nil {
+			return false, fmt.Errorf("failed to parse response: %w", err)
+		}
+	}
+
+	return result.Matches, nil
+}
+
+type ImageValidationRequest struct {
+	Title string `json:"title"`
+	Image string `json:"image"`
+}
+
 type Response struct {
 	ID                string   `json:"id"`
 	Object            string   `json:"object"`

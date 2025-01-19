@@ -1,35 +1,38 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
-
-	"github.com/davecgh/go-spew/spew"
 )
 
-func matchImage(title string, image byte) bool {
+func matchImage(title string, imageData []byte) bool {
 
-	prompt := fmt.Sprintf("Does this image match this title '%s'?", title)
-	system := "You assist in matching food images to recipe titles and output an answer only with 'yes' or 'no'."
 	openaiKey := os.Getenv("OPENAI_KEY")
-	maxTokens := 16384
 	format := "text"
-	ai := NewClient(openaiKey, "gpt-4o-mini-2024-07-18", format, false)
-	response, err := ai.Prompt(prompt, system, maxTokens)
+	ai := NewClient(openaiKey, "gpt-4o", format, false)
+
+	// Encode the image data to base64
+	imageBase64 := base64.StdEncoding.EncodeToString(imageData)
+	promptWithImage := fmt.Sprintf(" Image Data (base64): %s ", imageBase64)
+	response, err := ai.ValidateImage(title, promptWithImage)
 	if err != nil {
 		log.Println(err.Error())
 	}
-	spew.Dump(response)
 
-	return false
+	if response {
+		log.Println(imageBase64)
+		log.Println("Image matches:", title)
+	}
 
+	return response
 }
 
-func downloadImages(images []string) []byte {
-	imageList := make([]byte, 0)
+func downloadImages(images []string) [][]byte {
+	imageList := make([][]byte, 0)
 
 	// Download the images
 	for _, imageContent := range images {
@@ -51,7 +54,7 @@ func downloadImages(images []string) []byte {
 			log.Fatal("Error reading image data:", err)
 			continue
 		}
-		imageList = append(imageList, imageData...)
+		imageList = append(imageList, imageData)
 	}
 
 	return imageList
