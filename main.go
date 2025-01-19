@@ -19,6 +19,7 @@ import (
 	"github.com/jinzhu/copier"
 	"github.com/joho/godotenv"
 	"github.com/patrickmn/go-cache"
+	ginprometheus "github.com/zsais/go-gin-prometheus"
 )
 
 // Add cache as a global variable
@@ -70,6 +71,9 @@ func main() {
 
 		c.Next()
 	})
+
+	p := ginprometheus.NewPrometheus("gin")
+	p.Use(router)
 
 	router.GET("/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "Pong"})
