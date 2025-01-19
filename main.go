@@ -85,37 +85,32 @@ func main() {
 			return
 		}
 
-		recipe, filename := getRecipe(request.URL)
-		recipe.Link = fmt.Sprintf("/recipes/%s/%s", recipe.Category, strings.Replace(filename, ".json", "", 1))
+		go func(url string) {
+			recipe, filename := getRecipe(url)
+			recipe.Link = fmt.Sprintf("/recipes/%s/%s", recipe.Category, strings.Replace(filename, ".json", "", 1))
 
-		// Create JSON content
-		jsonContent, err := json.Marshal(recipe)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal recipe to JSON"})
-			return
-		}
+			jsonContent, err := json.Marshal(recipe)
+			if err != nil {
+				log.Printf("Failed to marshal recipe: %v", err)
+				return
+			}
 
-		// Initialize Cloudflare S3 client
-		s3Client, err := NewCloudflareS3()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to initialize S3 client"})
-			return
-		}
+			s3Client, err := NewCloudflareS3()
+			if err != nil {
+				log.Printf("Failed to initialize S3 client: %v", err)
+				return
+			}
 
-		// Upload to Cloudflare R2
-		if err := s3Client.UploadRecipe(filename, jsonContent); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to upload to R2"})
-			return
-		}
+			if err := s3Client.UploadRecipe(filename, jsonContent); err != nil {
+				log.Printf("Failed to upload recipe to R2: %v", err)
+				return
+			}
 
-		// Invalidate both caches after successful upload
-		recipeCache.Delete(filename)
-		recipesCache.Delete("all_recipes")
+			recipeCache.Delete(filename)
+			recipesCache.Delete("all_recipes")
+		}(request.URL)
 
-		c.JSON(http.StatusOK, gin.H{
-			"message":  "Recipe saved successfully",
-			"filename": filename,
-		})
+		c.JSON(http.StatusOK, gin.H{"message": "Recipe saved successfully"})
 	})
 
 	router.GET("/get-recipe/:name", func(c *gin.Context) {
@@ -260,28 +255,18 @@ func getRecipe(url string) (Recipe, string) {
 		log.Fatal(err)
 	}
 
-	// Get the image content
-	imageContent, err := page.MustElement("img").Attribute("src")
-	if err != nil {
-		log.Println("Error getting image source:", err)
-	}
+	// Extract all image sources
+	imageElements := doc.Find("img")
+	images := make([]string, 0)
 
-	// Download the image
-	resp, err := http.Get(*imageContent)
-	if err != nil {
-		log.Println("Error downloading image:", err)
-	}
-	defer resp.Body.Close()
+	imageElements.Each(func(i int, s *goquery.Selection) {
+		if src, exists := s.Attr("src"); exists {
+			images = append(images, src)
+		}
+	})
 
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("Failed to download image: %s \n", resp.Status)
-	}
-
-	// Read the image data
-	imageData, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Fatal("Error reading image data:", err)
-	}
+	// Download all images
+	imageList := downloadImages(images)
 
 	// Initialize Cloudflare S3 client
 	s3Client, err := NewCloudflareS3()
@@ -311,21 +296,31 @@ func getRecipe(url string) (Recipe, string) {
 	copier.Copy(&responseRecipe, &response)
 	after := time.Now()
 	diff := after.Sub(before)
-	log.Println("Time to call AI: ", diff.String())
+	log.Println("Time to call getting recipe AI: ", diff.String())
 	log.Println(response.Category)
 
 	title := response.Title
 	filename := strings.ToLower(strings.ReplaceAll(title, " ", "-")) + ".json"
-	log.Println(filename)
+	log.Printf("Filename for json: %s", filename)
 
-	// Upload the image to S3
-	imageFilename := fmt.Sprintf("images/%s.jpg", strings.ToLower(strings.ReplaceAll(title, " ", "-")))
-	if err := s3Client.UploadImage(imageFilename, "image/jpeg", imageData); err != nil {
-		log.Fatal("Error uploading image to S3:", err)
+	// Check if image matches title
+	var imageData []byte
+	for _, image := range imageList {
+		if matchImage(title, image) {
+			imageData = []byte{image}
+			break
+		}
 	}
 
+	// Upload the image to S3
+	if imageData != nil {
+		imageFilename := fmt.Sprintf("images/%s.jpg", strings.ToLower(strings.ReplaceAll(title, " ", "-")))
+		if err := s3Client.UploadImage(imageFilename, "image/jpeg", imageData); err != nil {
+			log.Fatal("Error uploading image to S3:", err)
+		}
+		responseRecipe.Image = fmt.Sprintf("https://cookingimage.bronson.dev/%s", imageFilename)
+	}
 	responseRecipe.OriginalURL = url
-	responseRecipe.Image = fmt.Sprintf("https://cookingimage.bronson.dev/%s", imageFilename)
 
 	return responseRecipe, filename
 }
