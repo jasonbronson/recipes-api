@@ -336,7 +336,10 @@ func getRecipe(url string) (Recipe, string) {
 		log.Fatal(err)
 	}
 
-	p := r.EnhancedPrompt[:999]
+	var p string
+	if len(r.EnhancedPrompt) > 999 {
+		p = r.EnhancedPrompt[:999]
+	}
 
 	// Generate image using AI
 	imageURL, err := ai.GenerateImage(p)
