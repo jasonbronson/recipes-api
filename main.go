@@ -26,6 +26,50 @@ import (
 var recipeCache *cache.Cache
 var recipesCache *cache.Cache
 
+func listRecipes(s3Client *CloudflareS3) ([]Recipe, error) {
+	// Try to get from cache first
+	if cachedRecipes, found := recipesCache.Get("all_recipes"); found {
+		allRecipes, ok := cachedRecipes.([]Recipe)
+		if !ok {
+			log.Println("Cache data type mismatch")
+			return nil, fmt.Errorf("cache data invalid")
+		}
+		log.Println("Cache hit for all recipes")
+		return allRecipes, nil
+	}
+
+	// If not in cache, get from S3 bucket
+	recipes, err := s3Client.ListRecipes()
+	if err != nil {
+		return nil, err
+	}
+
+	// Create slice to hold all recipe data
+	allRecipes := make([]Recipe, 0, len(recipes))
+
+	// Read each recipe file and parse it
+	for _, filename := range recipes {
+		content, err := s3Client.GetRecipe(filename)
+		if err != nil {
+			log.Printf("Error reading recipe %s: %v", filename, err)
+			continue
+		}
+
+		var recipe Recipe
+		if err := json.Unmarshal(content, &recipe); err != nil {
+			log.Printf("Error parsing recipe JSON %s: %v", filename, err)
+			continue
+		}
+
+		allRecipes = append(allRecipes, recipe)
+	}
+
+	// Store in cache for 1 hour
+	recipesCache.Set("all_recipes", allRecipes, 1*time.Hour)
+
+	return allRecipes, nil
+}
+
 func main() {
 	versionFlag := flag.Bool("version", false, "Print the version of the application")
 	flag.Parse()
@@ -155,70 +199,20 @@ func main() {
 		// Get the category from query parameters
 		category := c.Query("category")
 
-		// Try to get from cache first
-		if cachedRecipes, found := recipesCache.Get("all_recipes"); found {
-			allRecipes, ok := cachedRecipes.([]Recipe)
-			if !ok {
-				log.Println("Cache data type mismatch")
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Cache data invalid"})
-				return
-			}
-
-			log.Println("Cache hit for all recipes")
-
-			// Filter recipes by category if specified
-			if category != "" {
-				filteredRecipes := make([]Recipe, 0)
-				for _, recipe := range allRecipes {
-					if recipe.Category == category {
-						filteredRecipes = append(filteredRecipes, recipe)
-					}
-				}
-				c.JSON(http.StatusOK, filteredRecipes)
-				return
-			}
-
-			c.JSON(http.StatusOK, allRecipes)
-			return
-		}
-
-		// If not in cache, get from S3
+		// Use the new listRecipes function
 		s3Client, err := NewCloudflareS3()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to initialize S3 client"})
-			return
-		}
-
-		// Get list of all recipes
-		recipes, err := s3Client.ListRecipes()
 		if err != nil {
 			log.Println("Error listing recipes:", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list recipes"})
 			return
 		}
 
-		// Create slice to hold all recipe data
-		allRecipes := make([]Recipe, 0, len(recipes))
-
-		// Read each recipe file and parse it
-		for _, filename := range recipes {
-			content, err := s3Client.GetRecipe(filename)
-			if err != nil {
-				log.Printf("Error reading recipe %s: %v", filename, err)
-				continue
-			}
-
-			var recipe Recipe
-			if err := json.Unmarshal(content, &recipe); err != nil {
-				log.Printf("Error parsing recipe JSON %s: %v", filename, err)
-				continue
-			}
-
-			allRecipes = append(allRecipes, recipe)
+		allRecipes, err := listRecipes(s3Client)
+		if err != nil {
+			log.Println("Error listing recipes:", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list recipes"})
+			return
 		}
-
-		// Store in cache for 1 hour
-		recipesCache.Set("all_recipes", allRecipes, 1*time.Hour)
 
 		// Filter recipes by category if specified
 		if category != "" {
@@ -233,6 +227,36 @@ func main() {
 		}
 
 		c.JSON(http.StatusOK, allRecipes)
+	})
+
+	router.GET("/search-recipes", func(c *gin.Context) {
+		// Get the search term from query parameters
+		searchTerm := c.Query("q")
+
+		// Use the new listRecipes function
+		s3Client, err := NewCloudflareS3()
+		if err != nil {
+			log.Println("Error listing recipes:", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list recipes"})
+			return
+		}
+
+		allRecipes, err := listRecipes(s3Client)
+		if err != nil {
+			log.Println("Error listing recipes:", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list recipes"})
+			return
+		}
+
+		// Filter recipes by title based on the search term
+		filteredRecipes := make([]Recipe, 0)
+		for _, recipe := range allRecipes {
+			if strings.Contains(strings.ToLower(recipe.Title), strings.ToLower(searchTerm)) {
+				filteredRecipes = append(filteredRecipes, recipe)
+			}
+		}
+
+		c.JSON(http.StatusOK, filteredRecipes)
 	})
 
 	router.Run(":8080")
