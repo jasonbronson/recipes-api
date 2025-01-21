@@ -336,8 +336,10 @@ func getRecipe(url string) (Recipe, string) {
 		log.Fatal(err)
 	}
 
+	p := r.EnhancedPrompt[:999]
+
 	// Generate image using AI
-	imageURL, err := ai.GenerateImage(r.EnhancedPrompt)
+	imageURL, err := ai.GenerateImage(p)
 	if err != nil {
 		log.Printf("Error generating image: %v", err)
 	} else {
