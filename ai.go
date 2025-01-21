@@ -177,6 +177,28 @@ func (c *Client) ValidateImage(title, image string) (bool, error) {
 	return result.Matches, nil
 }
 
+func (c *Client) GenerateImage(prompt string) (string, error) {
+	ctx := context.Background()
+
+	req := openai.ImageRequest{
+		Prompt:         prompt,
+		Size:           openai.CreateImageSize1024x1024,
+		N:              1,
+		ResponseFormat: openai.CreateImageResponseFormatURL,
+	}
+
+	resp, err := c.client.CreateImage(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate image: %w", err)
+	}
+
+	if len(resp.Data) == 0 {
+		return "", fmt.Errorf("no image URL returned")
+	}
+
+	return resp.Data[0].URL, nil
+}
+
 type ImageValidationRequest struct {
 	Title string `json:"title"`
 	Image string `json:"image"`
