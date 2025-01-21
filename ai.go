@@ -44,7 +44,7 @@ func NewClient(apiKey, engine, format string, debug bool) *Client {
 	}
 }
 
-func (c *Client) Prompt(prompt, systemPrompt string, maxTokens int) (*Response, error) {
+func (c *Client) RecipePrompt(prompt, systemPrompt string, maxTokens int) (*Response, error) {
 	ctx := context.Background()
 
 	schemaJSON, err := json.Marshal(c.schema["schema"])
@@ -197,6 +197,69 @@ func (c *Client) GenerateImage(prompt string) (string, error) {
 	}
 
 	return resp.Data[0].URL, nil
+}
+
+func (c *Client) GenerateEnhancedFoodPrompt(foodItem string, maxTokens int) (*BasicResponse, error) {
+	ctx := context.Background()
+
+	// Define the system prompt for generating detailed and visually rich descriptions
+	systemPrompt := "You are a food stylist and photographer specializing in creating vivid, visually appealing descriptions for food items. Your job is to generate enhanced and detailed prompts suitable for creating high-quality images."
+
+	// User prompt for the specific food item and context
+	userPrompt := fmt.Sprintf("Create a visually appealing description for '%s'. Include details about texture, color, lighting, setting, and arrangement. Max characters can not exceed 1000 chars.", foodItem)
+
+	req := openai.ChatCompletionRequest{
+		Model: c.engine,
+		Messages: []openai.ChatCompletionMessage{
+			{
+				Role:    openai.ChatMessageRoleSystem,
+				Content: systemPrompt,
+			},
+			{
+				Role:    openai.ChatMessageRoleUser,
+				Content: userPrompt,
+			},
+		},
+		MaxTokens:   maxTokens,
+		Temperature: 0.9,
+	}
+
+	if c.debug {
+		log.Printf("Request: %+v\n", req)
+	}
+
+	resp, err := c.client.CreateChatCompletion(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate enhanced prompt: %w", err)
+	}
+
+	if c.debug {
+		log.Printf("foodResponse: %+v\n", resp)
+	}
+
+	var basicResponse BasicResponse
+	basicResponse.ID = resp.ID
+	basicResponse.Object = resp.Object
+	basicResponse.Created = resp.Created
+	basicResponse.Model = resp.Model
+	basicResponse.Usage = Usage{
+		PromptTokens:     resp.Usage.PromptTokens,
+		CompletionTokens: resp.Usage.CompletionTokens,
+		TotalTokens:      resp.Usage.TotalTokens,
+	}
+	basicResponse.EnhancedPrompt = resp.Choices[0].Message.Content
+
+	return &basicResponse, nil
+}
+
+type BasicResponse struct {
+	ID                string `json:"id"`                 // ID of the response
+	Object            string `json:"object"`             // Object type (e.g., "text_completion")
+	Created           int64  `json:"created"`            // Timestamp of creation
+	Model             string `json:"model"`              // Model used for the request
+	SystemFingerprint string `json:"system_fingerprint"` // Optional system fingerprint for debugging
+	Usage             Usage  `json:"usage"`              // Token usage details
+	EnhancedPrompt    string `json:"enhanced_prompt"`    // The generated detailed prompt
 }
 
 type ImageValidationRequest struct {
