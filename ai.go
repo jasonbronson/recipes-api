@@ -6,12 +6,13 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/sashabaranov/go-openai"
 )
 
-const defaultEngine = "gpt-4o-mini"
+const defaultEngine = "gpt-5-mini"
 
 type Client struct {
 	client *openai.Client
@@ -45,7 +46,9 @@ func NewClient(apiKey, engine, format string, debug bool) *Client {
 }
 
 func (c *Client) RecipePrompt(prompt, systemPrompt string, maxTokens int) (*Response, error) {
-	ctx := context.Background()
+	// Set 60-second timeout for OpenAI API calls
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	defer cancel()
 
 	schemaJSON, err := json.Marshal(c.schema["schema"])
 	if err != nil {
@@ -64,8 +67,8 @@ func (c *Client) RecipePrompt(prompt, systemPrompt string, maxTokens int) (*Resp
 				Content: prompt,
 			},
 		},
-		MaxTokens:   maxTokens,
-		Temperature: 0,
+		MaxCompletionTokens: maxTokens,
+		Temperature:         0,
 		ResponseFormat: &openai.ChatCompletionResponseFormat{
 			Type: openai.ChatCompletionResponseFormatTypeJSONSchema,
 			JSONSchema: &openai.ChatCompletionResponseFormatJSONSchema{
@@ -89,6 +92,10 @@ func (c *Client) RecipePrompt(prompt, systemPrompt string, maxTokens int) (*Resp
 		log.Printf("Response: %+v\n", resp)
 	}
 
+	if len(resp.Choices) == 0 || resp.Choices[0].Message.Content == "" {
+		return nil, fmt.Errorf("empty OpenAI chat completion response")
+	}
+
 	var response Response
 	if err := json.Unmarshal([]byte(resp.Choices[0].Message.Content), &response); err != nil {
 		return nil, err
@@ -109,7 +116,9 @@ func (c *Client) RecipePrompt(prompt, systemPrompt string, maxTokens int) (*Resp
 }
 
 func (c *Client) ValidateImage(title, image string) (bool, error) {
-	ctx := context.Background()
+	// Set 60-second timeout for OpenAI API calls
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 
 	// Define the JSON schema for enforcing a boolean response with additionalProperties set to false
 	schemaJSON := `{
@@ -135,8 +144,8 @@ func (c *Client) ValidateImage(title, image string) (bool, error) {
 				Content: fmt.Sprintf(`{"title": %q, "image": %q}`, title, image),
 			},
 		},
-		MaxTokens:   16000,
-		Temperature: 0,
+		MaxCompletionTokens: 16000,
+		Temperature:         0,
 		ResponseFormat: &openai.ChatCompletionResponseFormat{
 			Type: openai.ChatCompletionResponseFormatTypeJSONSchema,
 			JSONSchema: &openai.ChatCompletionResponseFormatJSONSchema{
@@ -178,7 +187,9 @@ func (c *Client) ValidateImage(title, image string) (bool, error) {
 }
 
 func (c *Client) GenerateImage(prompt string) (string, error) {
-	ctx := context.Background()
+	// Set 60-second timeout for OpenAI API calls
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 
 	req := openai.ImageRequest{
 		Prompt:         prompt,
@@ -200,7 +211,9 @@ func (c *Client) GenerateImage(prompt string) (string, error) {
 }
 
 func (c *Client) GenerateEnhancedFoodPrompt(foodItem string, maxTokens int) (*BasicResponse, error) {
-	ctx := context.Background()
+	// Set 60-second timeout for OpenAI API calls
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 
 	// Define the system prompt for generating detailed and visually rich descriptions
 	systemPrompt := "You are a food stylist and photographer specializing in creating vivid, visually appealing descriptions for food items. Your job is to generate enhanced and detailed prompts suitable for creating high-quality images."
@@ -220,8 +233,7 @@ func (c *Client) GenerateEnhancedFoodPrompt(foodItem string, maxTokens int) (*Ba
 				Content: userPrompt,
 			},
 		},
-		MaxTokens:   maxTokens,
-		Temperature: 0.9,
+		MaxCompletionTokens: maxTokens,
 	}
 
 	if c.debug {
@@ -235,6 +247,10 @@ func (c *Client) GenerateEnhancedFoodPrompt(foodItem string, maxTokens int) (*Ba
 
 	if c.debug {
 		log.Printf("foodResponse: %+v\n", resp)
+	}
+
+	if len(resp.Choices) == 0 || resp.Choices[0].Message.Content == "" {
+		return nil, fmt.Errorf("empty OpenAI chat completion response")
 	}
 
 	var basicResponse BasicResponse

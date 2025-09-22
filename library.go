@@ -7,13 +7,14 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 )
 
 func matchImage(title string, imageData []byte) bool {
 
 	openaiKey := os.Getenv("OPENAI_KEY")
 	format := "text"
-	ai := NewClient(openaiKey, "gpt-4o", format, false)
+	ai := NewClient(openaiKey, "gpt-5-mini", format, false)
 	// Encode the image data to base64
 	imageBase64 := base64.StdEncoding.EncodeToString(imageData)
 	promptWithImage := fmt.Sprintf(" Image Data (base64): %s ", imageBase64)
@@ -33,10 +34,15 @@ func matchImage(title string, imageData []byte) bool {
 func downloadImages(images []string) [][]byte {
 	imageList := make([][]byte, 0)
 
+	// Create HTTP client with 60-second timeout
+	client := &http.Client{
+		Timeout: 60 * time.Second,
+	}
+
 	// Download the images
 	for _, imageContent := range images {
 		log.Println("Downloading image:", imageContent)
-		resp, err := http.Get(imageContent)
+		resp, err := client.Get(imageContent)
 		if err != nil {
 			log.Println("Error downloading image:", err)
 			continue

@@ -1,0 +1,29 @@
+version: "3.8"
+
+services:
+  app:
+    image: jbronson29/recipes:latest
+    environment:
+      - JWT_SECRET=your-jwt-secret-key-here
+      - JWT_EXPIRATION=24h
+      - PORT=8080
+      - OPENAI_KEY=${OPENAI_KEY}
+      - MAILGUN_DOMAIN=${MAILGUN_DOMAIN}
+      - MAILGUN_API_KEY=${MAILGUN_API_KEY}
+      - MAILGUN_FROM=${MAILGUN_FROM}
+      - PASSWORD_RESET_URL=${PASSWORD_RESET_URL}
+      - CLOUDFLARE_ENDPOINT=${CLOUDFLARE_ENDPOINT}
+      - CLOUDFLARE_ACCESS_KEY=${CLOUDFLARE_ACCESS_KEY}
+      - CLOUDFLARE_SECRET_KEY=${CLOUDFLARE_SECRET_KEY}
+    ports:
+      - "80:8080"
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+
+  watchtower:
+    image: containrrr/watchtower
+    command: --interval 60 --label-enable --cleanup
+    environment:
+      - WATCHTOWER_TRACE=true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

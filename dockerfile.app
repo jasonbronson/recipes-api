@@ -1,10 +1,13 @@
 FROM golang:1.22.5
 
-# Set environment variables
-ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+# Build env
+ENV CGO_ENABLED=1 \
+    CHROME_BIN=/usr/bin/chromium \
+    CHROMIUM_BIN=/usr/bin/chromium \
+    DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y \
-    bash \    
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
     chromium \
     libnss3 \
     libatk1.0-0 \
@@ -19,18 +22,30 @@ RUN apt-get update && apt-get install -y \
     libgdk-pixbuf2.0-0 \
     libasound2 \
     libxdamage1 \
-    libxinerama1
+    libxinerama1 \
+    libx11-6 \
+    libx11-xcb1 \
+    libxcb1 \
+    libxext6 \
+    libxfixes3 \
+    libxrender1 \
+    libxtst6 \
+    libdrm2 \
+    libxkbcommon0 \
+    libgtk-3-0 \
+    libgbm1 \
+    fonts-liberation \
+    fonts-noto-color-emoji \
+    gcc \
+    libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-# Build Go app
-RUN mkdir /app
 WORKDIR /app
 COPY . .
-RUN go build -o /app/myapp .
+RUN go build -trimpath -ldflags="-s -w" -o /app/api .
 
 COPY ./schema.json /app/
 
-# Expose necessary ports
 EXPOSE 8080
 
-# Default command
-ENTRYPOINT ["/app/myapp"]
+ENTRYPOINT ["/app/api"]
