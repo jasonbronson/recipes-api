@@ -26,12 +26,27 @@
         "type": "integer"
       },
       "category": {
-        "type": "string"
+        "type": "string",
+        "enum": ["breakfast", "dinner", "baking", "other"]
       },
       "ingredients": {
         "type": "array",
         "items": {
           "type": "string"
+        }
+      },
+      "parsedIngredients": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "amountValue": { "type": "number" },
+            "amountText": { "type": "string" },
+            "unit": { "type": "string" },
+            "description": { "type": "string" }
+          },
+          "required": ["amountValue", "amountText", "unit", "description"],
+          "additionalProperties": false
         }
       },
       "instructions": {
@@ -49,6 +64,7 @@
       "cookTime",
       "totalTime",
       "servings",
+      "parsedIngredients",
       "ingredients",
       "instructions",
       "category"

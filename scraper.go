@@ -141,27 +141,50 @@ func getRecipe(pageURL string) (Recipe, string, error) {
 	}
 	defer browser.MustClose()
 
-	page := browser.MustPage()
+	page := browser.MustPage().Timeout(60 * time.Second)
 
-	// Set 60-second timeout for page navigation and load
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	err = rod.Try(func() {
-		page.MustNavigate(pageURL).MustWaitLoad()
-	})
-	if err != nil {
-		return Recipe{}, "", fmt.Errorf("page navigation timeout: %w", err)
+	// Try navigating with retries to mitigate transient "Execution context was destroyed" errors
+	var content string
+	var navErr error
+	for attempt := 1; attempt <= 2; attempt++ {
+		err = rod.Try(func() {
+			page.MustNavigate(pageURL).MustWaitLoad()
+		})
+		if err == nil {
+			content = page.MustHTML()
+			break
+		}
+		navErr = err
+		log.Printf("Scraper: navigation attempt %d failed: %v", attempt, err)
+		// Open a fresh page for the next attempt
+		page = browser.MustPage().Timeout(60 * time.Second)
+		time.Sleep(500 * time.Millisecond)
 	}
 
-	// Check if context was cancelled due to timeout
-	select {
-	case <-ctx.Done():
-		return Recipe{}, "", fmt.Errorf("browser operation timed out after 60 seconds")
-	default:
+	// If navigation failed, fall back to direct HTTP fetch of the page HTML
+	if strings.TrimSpace(content) == "" {
+		log.Printf("Scraper: falling back to HTTP fetch for %s", pageURL)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
+		if reqErr != nil {
+			return Recipe{}, "", fmt.Errorf("build http request: %w", reqErr)
+		}
+		client := &http.Client{Timeout: 60 * time.Second}
+		resp, httpErr := client.Do(req)
+		if httpErr != nil {
+			return Recipe{}, "", fmt.Errorf("page navigation timeout: %w; http fallback failed: %w", navErr, httpErr)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return Recipe{}, "", fmt.Errorf("page navigation timeout: %w; http fallback status: %s", navErr, resp.Status)
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return Recipe{}, "", fmt.Errorf("http fallback read body: %w", readErr)
+		}
+		content = string(body)
 	}
-
-	content := page.MustHTML()
 
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(content))
 	if err != nil {
@@ -171,7 +194,7 @@ func getRecipe(pageURL string) (Recipe, string, error) {
 	doc.Find("script, style").Remove()
 	cleanedText := strings.TrimSpace(doc.Text())
 
-	prompt := fmt.Sprintf("Extract the recipe details from the provided text, including name/title, description, instructions, ingredients, original_url, featuredImage, and category. Category is either breakfast, dinner or baking. Ensure all steps and ingredients are fully covered. %v", cleanedText)
+	prompt := fmt.Sprintf("Extract the recipe details from the provided text, including name/title, description, instructions, ingredients, original_url, featuredImage, and category. Category must be one of: breakfast, dinner, baking, other. Choose the most appropriate one. Ensure all steps and ingredients are fully covered. %v", cleanedText)
 	system := "You assist in extracting recipe data from web pages and output in json format."
 	maxTokens := 16384
 	format := "text"
@@ -299,4 +322,66 @@ func extensionForContentType(contentType string) string {
 	default:
 		return ""
 	}
+}
+
+// fetchTitleViaHTTP attempts a lightweight fetch of the page and returns the best-effort title.
+func fetchTitleViaHTTP(pageURL string) string {
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(pageURL)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ""
+	}
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(string(data)))
+	if err != nil {
+		return ""
+	}
+	if t := strings.TrimSpace(doc.Find("meta[property='og:title']").AttrOr("content", "")); t != "" {
+		return t
+	}
+	if t := strings.TrimSpace(doc.Find("title").First().Text()); t != "" {
+		return t
+	}
+	return ""
+}
+
+// deriveTitleFromURL creates a human-readable title from the URL if no HTML title is available.
+func deriveTitleFromURL(pageURL string) string {
+	u, err := url.Parse(pageURL)
+	if err != nil {
+		return ""
+	}
+	path := strings.Trim(u.Path, "/")
+	if path == "" {
+		return strings.TrimSpace(u.Host)
+	}
+	parts := strings.Split(path, "/")
+	last := parts[len(parts)-1]
+	last = strings.ReplaceAll(last, "-", " ")
+	last = strings.ReplaceAll(last, "_", " ")
+	last = strings.TrimSpace(last)
+	if last != "" {
+		return last
+	}
+	return strings.TrimSpace(u.Host)
+}
+
+// FallbackTitleAndSlug returns a best-effort title and slug using an HTTP fetch or URL parsing.
+func FallbackTitleAndSlug(pageURL string) (string, string) {
+	title := fetchTitleViaHTTP(pageURL)
+	if strings.TrimSpace(title) == "" {
+		title = deriveTitleFromURL(pageURL)
+	}
+	if strings.TrimSpace(title) == "" {
+		title = "Untitled"
+	}
+	slug := strings.ToLower(strings.ReplaceAll(title, " ", "-"))
+	return title, slug
 }

@@ -49,60 +49,30 @@ func handleSaveRecipe(c *gin.Context) {
 	c.JSON(http.StatusAccepted, gin.H{"message": "recipe queued for processing"})
 }
 
-func handleUpsertRecipeNote(c *gin.Context) {
-	username, err := extractUsernameFromBearer(c.GetHeader("Authorization"))
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
-		return
-	}
-
-	slug := c.Param("slug")
-	var request struct {
-		Note string `json:"note"`
-	}
-
-	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "note is required"})
-		return
-	}
-
-	if err := recipeRepo.UpsertRecipeNote(username, slug, request.Note); err != nil {
-		log.Printf("Failed to upsert note for %s/%s: %v", username, slug, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save note"})
-		return
-	}
-
-	recipeCache.Delete(singleRecipeCacheKey(username, slug))
-	invalidateUserRecipeCaches(username)
-
-	c.JSON(http.StatusOK, gin.H{"message": "note saved"})
-}
-
-func handleDeleteRecipeNote(c *gin.Context) {
-	username, err := extractUsernameFromBearer(c.GetHeader("Authorization"))
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
-		return
-	}
-
-	slug := c.Param("slug")
-
-	if err := recipeRepo.DeleteRecipeNote(username, slug); err != nil {
-		log.Printf("Failed to delete note for %s/%s: %v", username, slug, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete note"})
-		return
-	}
-
-	recipeCache.Delete(singleRecipeCacheKey(username, slug))
-	invalidateUserRecipeCaches(username)
-
-	c.JSON(http.StatusOK, gin.H{"message": "note deleted"})
-}
-
 func handleFavoriteRecipe(c *gin.Context) {
 	username, err := extractUsernameFromBearer(c.GetHeader("Authorization"))
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		return
+	}
+
+	if idStr := strings.TrimSpace(c.Param("id")); idStr != "" {
+		id64, convErr := strconv.ParseUint(idStr, 10, 64)
+		if convErr != nil || id64 == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+			return
+		}
+		if err := recipeRepo.SetFavoriteByID(username, uint(id64), true); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "recipe not found"})
+				return
+			}
+			log.Printf("Failed to favorite recipe %s id=%d: %v", username, id64, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to favorite recipe"})
+			return
+		}
+		invalidateUserRecipeCaches(username)
+		c.JSON(http.StatusOK, gin.H{"message": "recipe favorited"})
 		return
 	}
 
@@ -126,6 +96,26 @@ func handleUnfavoriteRecipe(c *gin.Context) {
 		return
 	}
 
+	if idStr := strings.TrimSpace(c.Param("id")); idStr != "" {
+		id64, convErr := strconv.ParseUint(idStr, 10, 64)
+		if convErr != nil || id64 == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+			return
+		}
+		if err := recipeRepo.SetFavoriteByID(username, uint(id64), false); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "recipe not found"})
+				return
+			}
+			log.Printf("Failed to unfavorite recipe %s id=%d: %v", username, id64, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to unfavorite recipe"})
+			return
+		}
+		invalidateUserRecipeCaches(username)
+		c.JSON(http.StatusOK, gin.H{"message": "recipe unfavorited"})
+		return
+	}
+
 	slug := c.Param("slug")
 	if err := recipeRepo.SetFavorite(username, slug, false); err != nil {
 		log.Printf("Failed to unfavorite recipe %s/%s: %v", username, slug, err)
@@ -140,10 +130,53 @@ func handleUnfavoriteRecipe(c *gin.Context) {
 }
 
 func handleGetRecipe(c *gin.Context) {
-	slug := c.Param("name")
 	username, err := usernameFromRequest(c)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		return
+	}
+
+	if idStr := strings.TrimSpace(c.Query("id")); idStr != "" {
+		id64, convErr := strconv.ParseUint(idStr, 10, 64)
+		if convErr != nil || id64 == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+			return
+		}
+
+		cacheKey := singleRecipeIDCacheKey(username, uint(id64))
+		if cachedRecipe, found := recipeCache.Get(cacheKey); found {
+			if recipe, ok := cachedRecipe.(Recipe); ok {
+				log.Printf("Cache hit for %s", cacheKey)
+				clone := cloneRecipe(recipe)
+				scaleRecipeFromQuery(c, &clone)
+				c.JSON(http.StatusOK, clone)
+				return
+			}
+			log.Printf("Invalid cache entry for %s, evicting", cacheKey)
+			recipeCache.Delete(cacheKey)
+		}
+
+		recipe, err := recipeRepo.GetRecipeByID(username, uint(id64))
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "recipe not found"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch recipe"})
+			return
+		}
+
+		recipeCache.Set(cacheKey, recipe, 30*time.Minute)
+		clone := cloneRecipe(recipe)
+		scaleRecipeFromQuery(c, &clone)
+		c.JSON(http.StatusOK, clone)
+		return
+	}
+
+	// Fallback to slug for backward compatibility if id query is absent
+	slug := c.Param("name")
+	if strings.TrimSpace(slug) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id is required"})
 		return
 	}
 
@@ -166,7 +199,6 @@ func handleGetRecipe(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "recipe not found"})
 			return
 		}
-		log.Printf("Error fetching recipe %s for %s: %v", slug, username, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch recipe"})
 		return
 	}
@@ -184,6 +216,22 @@ func handleDeleteRecipe(c *gin.Context) {
 		return
 	}
 
+	if idStr := strings.TrimSpace(c.Param("id")); idStr != "" {
+		id64, convErr := strconv.ParseUint(idStr, 10, 64)
+		if convErr != nil || id64 == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+			return
+		}
+		if err := recipeRepo.DeleteRecipeByID(username, uint(id64)); err != nil {
+			log.Printf("Error deleting recipe id=%d for %s: %v", id64, username, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete recipe"})
+			return
+		}
+		invalidateUserRecipeCaches(username)
+		c.JSON(http.StatusOK, gin.H{"message": "recipe removed"})
+		return
+	}
+
 	slug := c.Param("slug")
 
 	if err := recipeRepo.DeleteRecipe(username, slug); err != nil {
@@ -198,6 +246,77 @@ func handleDeleteRecipe(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "recipe removed"})
 }
 
+func handlePatchRecipe(c *gin.Context) {
+	username, err := extractUsernameFromBearer(c.GetHeader("Authorization"))
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		return
+	}
+
+	slug := c.Param("slug")
+	idStr := strings.TrimSpace(c.Param("id"))
+
+	var request struct {
+		Title        *string   `json:"title"`
+		Instructions *[]string `json:"instructions"`
+		Category     *string   `json:"category"`
+	}
+
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body"})
+		return
+	}
+
+	if request.Title == nil && request.Instructions == nil && request.Category == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
+		return
+	}
+
+	if idStr != "" {
+		id64, convErr := strconv.ParseUint(idStr, 10, 64)
+		if convErr != nil || id64 == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+			return
+		}
+		updated, err := recipeRepo.UpdateRecipeTitleAndInstructionsByID(username, uint(id64), request.Title, request.Instructions, request.Category)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "recipe not found"})
+				return
+			}
+			if errors.Is(err, ErrInvalidCategory) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid category; allowed: breakfast, dinner, baking, other"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update recipe"})
+			return
+		}
+		invalidateUserRecipeCaches(username)
+		c.JSON(http.StatusOK, updated)
+		return
+	}
+
+	updated, err := recipeRepo.UpdateRecipeTitleAndInstructions(username, slug, request.Title, request.Instructions, request.Category)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "recipe not found"})
+			return
+		}
+		if errors.Is(err, ErrInvalidCategory) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid category; allowed: breakfast, dinner, baking, other"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update recipe"})
+		return
+	}
+
+	// Invalidate caches for this user and recipe
+	recipeCache.Delete(singleRecipeCacheKey(username, slug))
+	invalidateUserRecipeCaches(username)
+
+	c.JSON(http.StatusOK, updated)
+}
+
 func handleListRecipes(c *gin.Context) {
 	username, err := usernameFromRequest(c)
 	if err != nil {
@@ -206,7 +325,8 @@ func handleListRecipes(c *gin.Context) {
 	}
 
 	category := c.Query("category")
-	recipes, err := listRecipes(username, category)
+	refresh := strings.EqualFold(strings.TrimSpace(c.Query("refresh")), "true")
+	recipes, err := listRecipes(username, category, refresh)
 	if err != nil {
 		log.Printf("Error listing recipes for %s: %v", username, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list recipes"})
@@ -350,14 +470,14 @@ func scaleParsedIngredients(recipe *Recipe, scale float64) {
 			scaledAmount := base * scale
 			detail.AmountValue = floatPtr(scaledAmount)
 			detail.AmountText = formatAmount(scaledAmount)
-			detail.Display = composeDisplay(detail.AmountText, detail.Description)
+			detail.Display = composeDisplayWithUnit(detail.AmountText, detail.Unit, detail.Description)
 		} else {
 			detail.AmountValue = nil
 			if detail.BaseAmountText != "" {
 				detail.AmountText = detail.BaseAmountText
 			}
 			if strings.TrimSpace(detail.Display) == "" {
-				detail.Display = composeDisplay(detail.AmountText, detail.Description)
+				detail.Display = composeDisplayWithUnit(detail.AmountText, detail.Unit, detail.Description)
 			}
 		}
 		recipe.Ingredients[i] = strings.TrimSpace(detail.Display)
@@ -375,9 +495,9 @@ func ensureRecipeDisplays(recipe *Recipe) {
 		detail := &recipe.ParsedIngredients[i]
 		if strings.TrimSpace(detail.Display) == "" {
 			if detail.AmountText != "" {
-				detail.Display = composeDisplay(detail.AmountText, detail.Description)
+				detail.Display = composeDisplayWithUnit(detail.AmountText, detail.Unit, detail.Description)
 			} else if detail.BaseAmountText != "" {
-				detail.Display = composeDisplay(detail.BaseAmountText, detail.Description)
+				detail.Display = composeDisplayWithUnit(detail.BaseAmountText, detail.Unit, detail.Description)
 			} else {
 				detail.Display = strings.TrimSpace(detail.Description)
 			}

@@ -11,6 +11,10 @@ func singleRecipeCacheKey(username, slug string) string {
 	return fmt.Sprintf("recipe:%s:%s", username, slug)
 }
 
+func singleRecipeIDCacheKey(username string, id uint) string {
+	return fmt.Sprintf("recipe:%s:id:%d", username, id)
+}
+
 func recipeListCacheKey(username, category string) string {
 	if category == "" {
 		return fmt.Sprintf("recipes:%s:all", username)
@@ -27,19 +31,21 @@ func invalidateUserRecipeCaches(username string) {
 	}
 }
 
-func listRecipes(username, category string) ([]Recipe, error) {
+func listRecipes(username, category string, refresh bool) ([]Recipe, error) {
 	if username == "" {
 		return nil, fmt.Errorf("username is required")
 	}
 
 	cacheKey := recipeListCacheKey(username, category)
-	if cachedRecipes, found := recipesCache.Get(cacheKey); found {
-		if recipes, ok := cachedRecipes.([]Recipe); ok {
-			log.Printf("Cache hit for %s", cacheKey)
-			return recipes, nil
+	if !refresh {
+		if cachedRecipes, found := recipesCache.Get(cacheKey); found {
+			if recipes, ok := cachedRecipes.([]Recipe); ok {
+				log.Printf("Cache hit for %s", cacheKey)
+				return recipes, nil
+			}
+			log.Printf("Invalid cache entry for %s, evicting", cacheKey)
+			recipesCache.Delete(cacheKey)
 		}
-		log.Printf("Invalid cache entry for %s, evicting", cacheKey)
-		recipesCache.Delete(cacheKey)
 	}
 
 	recipes, err := recipeRepo.ListRecipes(username, category)

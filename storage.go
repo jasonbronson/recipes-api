@@ -11,11 +11,9 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
@@ -39,13 +37,16 @@ func (UserModel) TableName() string {
 
 type RecipeModel struct {
 	ID           uint      `gorm:"primaryKey"`
-	Slug         string    `gorm:"column:slug;not null;size:255;uniqueIndex"`
+	UserID       uint      `gorm:"column:user_id;not null;index;uniqueIndex:uid_slug"`
+	Slug         string    `gorm:"column:slug;not null;size:255;uniqueIndex:uid_slug"`
 	Title        string    `gorm:"column:title;not null"`
 	Category     string    `gorm:"column:category"`
 	CookTime     int       `gorm:"column:cook_time"`
 	Date         string    `gorm:"column:date"`
 	Image        string    `gorm:"column:image"`
 	Instructions string    `gorm:"column:instructions;not null"`
+	Ingredients  string    `gorm:"column:ingredients"`
+	ParsedJSON   string    `gorm:"column:parsed_ingredients"`
 	PrepTime     int       `gorm:"column:prep_time"`
 	Servings     int       `gorm:"column:servings"`
 	TotalTime    int       `gorm:"column:total_time"`
@@ -73,31 +74,6 @@ type QueueModel struct {
 
 func (QueueModel) TableName() string {
 	return "queue"
-}
-
-type UserRecipeModel struct {
-	ID        uint      `gorm:"primaryKey"`
-	UserID    uint      `gorm:"column:user_id;not null;index"`
-	RecipeID  uint      `gorm:"column:recipe_id;not null;index"`
-	CreatedAt time.Time `gorm:"column:created_at;autoCreateTime"`
-	UpdatedAt time.Time `gorm:"column:updated_at;autoUpdateTime"`
-}
-
-func (UserRecipeModel) TableName() string {
-	return "user_recipes"
-}
-
-type NoteModel struct {
-	ID        uint      `gorm:"primaryKey"`
-	UserID    uint      `gorm:"column:user_id;not null;index"`
-	RecipeID  uint      `gorm:"column:recipe_id;not null;index"`
-	Content   string    `gorm:"column:content;not null"`
-	CreatedAt time.Time `gorm:"column:created_at;autoCreateTime"`
-	UpdatedAt time.Time `gorm:"column:updated_at;autoUpdateTime"`
-}
-
-func (NoteModel) TableName() string {
-	return "notes"
 }
 
 type CategoryCount struct {
@@ -146,31 +122,60 @@ func composeDisplay(amountText, description string) string {
 }
 
 type IngredientModel struct {
-	ID          uint      `gorm:"primaryKey"`
-	RecipeID    uint      `gorm:"column:recipe_id;not null;index"`
-	Position    int       `gorm:"column:position"`
-	AmountValue *float64  `gorm:"column:amount_value"`
-	AmountText  string    `gorm:"column:amount_text"`
-	Description string    `gorm:"column:description"`
-	CreatedAt   time.Time `gorm:"column:created_at;autoCreateTime"`
-	UpdatedAt   time.Time `gorm:"column:updated_at;autoUpdateTime"`
 }
 
-func (IngredientModel) TableName() string { return "recipe_ingredients" }
+var (
+	allowedCategories = map[string]struct{}{
+		"breakfast": {},
+		"dinner":    {},
+		"baking":    {},
+		"other":     {},
+	}
+	ErrInvalidCategory = errors.New("invalid category")
+)
+
+func normalizeCategoryOrOther(category string) string {
+	c := strings.ToLower(strings.TrimSpace(category))
+	if _, ok := allowedCategories[c]; ok {
+		return c
+	}
+	return "other"
+}
+
+func normalizeCategoryStrict(category string) (string, bool) {
+	c := strings.ToLower(strings.TrimSpace(category))
+	if _, ok := allowedCategories[c]; ok {
+		return c, true
+	}
+	return "", false
+}
 
 func recipeIsComplete(recipe Recipe) bool {
 	if strings.TrimSpace(recipe.Title) == "" {
 		return false
 	}
-	if len(recipe.Ingredients) == 0 || len(recipe.Instructions) == 0 {
+	if len(recipe.Ingredients) == 0 && len(recipe.ParsedIngredients) == 0 {
+		return false
+	}
+	if len(recipe.Instructions) == 0 {
 		return false
 	}
 
 	ingValid := false
+	// Check raw ingredients list
 	for _, ing := range recipe.Ingredients {
 		if strings.TrimSpace(ing) != "" {
 			ingValid = true
 			break
+		}
+	}
+	// If none valid, check parsed ingredients
+	if !ingValid {
+		for _, d := range recipe.ParsedIngredients {
+			if strings.TrimSpace(d.Description) != "" || strings.TrimSpace(d.AmountText) != "" || d.AmountValue != nil {
+				ingValid = true
+				break
+			}
 		}
 	}
 
@@ -283,16 +288,65 @@ func (r *RecipeRepository) CreateUser(username, password string) error {
 	}
 	hashStr := string(hash)
 
+	// Create user and assign default recipes in a single transaction
+	tx := r.db.Begin()
+	if err := tx.Error; err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		} else {
+			tx.Commit()
+		}
+	}()
+
 	user := UserModel{
 		Username:     username,
 		PasswordHash: &hashStr,
 	}
-
-	if err := r.db.Create(&user).Error; err != nil {
+	if err = tx.Create(&user).Error; err != nil {
 		if errors.Is(err, gorm.ErrDuplicatedKey) || strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return fmt.Errorf("create user: username already exists")
 		}
 		return fmt.Errorf("create user: %w", err)
+	}
+
+	// Assign the first 4 recipes (by oldest created) to the new user (copy to user-owned)
+	var defaultRecipes []RecipeModel
+	if err = tx.Order("created_at ASC").Limit(4).Find(&defaultRecipes).Error; err != nil {
+		// Do not fail registration if recipes table missing; commit user creation
+		if isNoSuchTableError(err) {
+			log.Println("[Registration] recipes table missing; skipping default recipe assignment")
+			return nil
+		}
+		return fmt.Errorf("fetch default recipes: %w", err)
+	}
+
+	for _, rec := range defaultRecipes {
+		// Create a user-owned copy with same slug (if conflict, append suffix)
+		copy := rec
+		copy.ID = 0
+		copy.UserID = user.ID
+		// Ensure unique (user_id, slug)
+		trySlug := copy.Slug
+		for attempt := 0; attempt < 3; attempt++ {
+			copy.Slug = trySlug
+			if err := tx.Create(&copy).Error; err != nil {
+				if strings.Contains(strings.ToLower(err.Error()), "unique") {
+					trySlug = fmt.Sprintf("%s-%d", rec.Slug, attempt+2)
+					continue
+				}
+				return err
+			}
+			break
+		}
+	}
+
+	if len(defaultRecipes) > 0 {
+		log.Printf("[Registration] assigned %d default recipes to user %s", len(defaultRecipes), username)
+	} else {
+		log.Printf("[Registration] no recipes found to assign to user %s", username)
 	}
 
 	return nil
@@ -370,26 +424,6 @@ func (r *RecipeRepository) getRecipeIDBySlug(slug string) (uint, error) {
 	return model.ID, nil
 }
 
-func (r *RecipeRepository) linkUserToRecipe(userID, recipeID uint) error {
-	return r.linkUserToRecipeTx(r.db, userID, recipeID)
-}
-
-func (r *RecipeRepository) linkUserToRecipeTx(tx *gorm.DB, userID, recipeID uint) error {
-	if userID == 0 || recipeID == 0 {
-		return errors.New("user and recipe are required")
-	}
-
-	link := UserRecipeModel{UserID: userID, RecipeID: recipeID}
-	if err := tx.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "user_id"}, {Name: "recipe_id"}},
-		DoNothing: true,
-	}).Create(&link).Error; err != nil {
-		return fmt.Errorf("link recipe to user: %w", err)
-	}
-
-	return nil
-}
-
 func (r *RecipeRepository) LinkRecipeIfExists(username, recipeURL string) (bool, string, error) {
 	if strings.TrimSpace(recipeURL) == "" {
 		return false, "", errors.New("url is required")
@@ -400,12 +434,12 @@ func (r *RecipeRepository) LinkRecipeIfExists(username, recipeURL string) (bool,
 		return false, "", err
 	}
 
-	model, err := r.findRecipeByOriginalURL(recipeURL)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+	var model *RecipeModel
+	if err := r.db.Where("user_id = ? AND original_url = ?", userID, recipeURL).First(&model).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return false, "", nil
 		}
-		return false, "", err
+		return false, "", fmt.Errorf("find recipe: %w", err)
 	}
 
 	recipe, err := model.toRecipe()
@@ -413,39 +447,20 @@ func (r *RecipeRepository) LinkRecipeIfExists(username, recipeURL string) (bool,
 		return false, "", err
 	}
 
-	ingDisplays, parsedIngredients, err := r.getRecipeIngredients(model.ID)
-	if err != nil {
-		return false, "", err
+	// Populate ingredients from JSON on model
+	if strings.TrimSpace(model.Ingredients) != "" {
+		_ = json.Unmarshal([]byte(model.Ingredients), &recipe.Ingredients)
 	}
-	recipe.Ingredients = ingDisplays
-	recipe.ParsedIngredients = parsedIngredients
+	if strings.TrimSpace(model.ParsedJSON) != "" {
+		_ = json.Unmarshal([]byte(model.ParsedJSON), &recipe.ParsedIngredients)
+	}
 
 	if !recipeIsComplete(recipe) {
 		log.Printf("existing recipe %s lacks complete data; reprocessing", model.Slug)
 		return false, "", nil
 	}
 
-	if err := r.linkUserToRecipe(userID, model.ID); err != nil {
-		return false, "", err
-	}
-
 	return true, model.Slug, nil
-}
-
-func (r *RecipeRepository) getUserNote(userID, recipeID uint) (*string, error) {
-	var note NoteModel
-	if err := r.db.Where("user_id = ? AND recipe_id = ?", userID, recipeID).
-		First(&note).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, nil
-		}
-		if isNoSuchTableError(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("get note: %w", err)
-	}
-
-	return &note.Content, nil
 }
 
 func (r *RecipeRepository) isFavorite(userID, recipeID uint) (bool, error) {
@@ -494,60 +509,6 @@ func (r *RecipeRepository) SetFavorite(username, slug string, favorite bool) err
 			return nil
 		}
 		return fmt.Errorf("remove favorite: %w", err)
-	}
-
-	return nil
-}
-
-func (r *RecipeRepository) UpsertRecipeNote(username, slug, content string) error {
-	content = strings.TrimSpace(content)
-	if content == "" {
-		return r.DeleteRecipeNote(username, slug)
-	}
-
-	userID, err := r.getUserID(username)
-	if err != nil {
-		return err
-	}
-
-	recipeID, err := r.getRecipeIDBySlug(slug)
-	if err != nil {
-		return err
-	}
-
-	note := NoteModel{
-		UserID:   userID,
-		RecipeID: recipeID,
-		Content:  content,
-	}
-
-	if err := r.db.Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "user_id"}, {Name: "recipe_id"}},
-		DoUpdates: clause.Assignments(map[string]any{
-			"content":    content,
-			"updated_at": time.Now(),
-		}),
-	}).Create(&note).Error; err != nil {
-		return fmt.Errorf("upsert note: %w", err)
-	}
-
-	return nil
-}
-
-func (r *RecipeRepository) DeleteRecipeNote(username, slug string) error {
-	userID, err := r.getUserID(username)
-	if err != nil {
-		return err
-	}
-
-	recipeID, err := r.getRecipeIDBySlug(slug)
-	if err != nil {
-		return err
-	}
-
-	if err := r.db.Where("user_id = ? AND recipe_id = ?", userID, recipeID).
-		Delete(&NoteModel{}).Error; err != nil {
-		return fmt.Errorf("delete note: %w", err)
 	}
 
 	return nil
@@ -627,6 +588,128 @@ func (r *RecipeRepository) ResetPasswordWithToken(token, newPassword string) err
 	}
 
 	return nil
+}
+
+// UpdateRecipeTitleAndInstructions updates only the title and/or instructions
+// for a recipe identified by slug, limited to recipes linked to the username.
+// If both fields are empty/nil, it is a no-op. Returns the updated recipe.
+func (r *RecipeRepository) UpdateRecipeTitleAndInstructions(username, slug string, title *string, instructions *[]string, category *string) (Recipe, error) {
+	if strings.TrimSpace(username) == "" || strings.TrimSpace(slug) == "" {
+		return Recipe{}, errors.New("username and slug are required")
+	}
+
+	// Ensure user has access and get recipe model
+	var model RecipeModel
+	if err := r.db.Table("recipes").
+		Select("recipes.*").
+		Joins("JOIN users u ON u.id = recipes.user_id").
+		Where("u.username = ? AND recipes.slug = ?", username, slug).
+		First(&model).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return Recipe{}, sql.ErrNoRows
+		}
+		return Recipe{}, fmt.Errorf("get recipe for update: %w", err)
+	}
+
+	updates := map[string]any{
+		"updated_at": gorm.Expr("CURRENT_TIMESTAMP"),
+	}
+	if title != nil {
+		updates["title"] = strings.TrimSpace(*title)
+	}
+	if instructions != nil {
+		// Marshal instructions array to JSON string as stored in DB
+		data, err := json.Marshal(*instructions)
+		if err != nil {
+			return Recipe{}, fmt.Errorf("marshal instructions: %w", err)
+		}
+		updates["instructions"] = string(data)
+	}
+	if category != nil {
+		if norm, ok := normalizeCategoryStrict(*category); ok {
+			updates["category"] = norm
+		} else {
+			return Recipe{}, ErrInvalidCategory
+		}
+	}
+
+	if len(updates) > 1 { // more than just updated_at
+		if err := r.db.Model(&RecipeModel{}).Where("id = ?", model.ID).Updates(updates).Error; err != nil {
+			return Recipe{}, fmt.Errorf("update recipe: %w", err)
+		}
+	}
+
+	// Re-fetch and return updated recipe
+	var refreshed RecipeModel
+	if err := r.db.First(&refreshed, model.ID).Error; err != nil {
+		return Recipe{}, fmt.Errorf("reload recipe: %w", err)
+	}
+	recipe, err := refreshed.toRecipe()
+	if err != nil {
+		return Recipe{}, err
+	}
+	return recipe, nil
+}
+
+// UpdateRecipeTitleAndInstructionsByID updates title and/or instructions by recipe ID for the given user
+func (r *RecipeRepository) UpdateRecipeTitleAndInstructionsByID(username string, recipeID uint, title *string, instructions *[]string, category *string) (Recipe, error) {
+	if strings.TrimSpace(username) == "" || recipeID == 0 {
+		return Recipe{}, errors.New("username and id are required")
+	}
+
+	userID, err := r.getUserID(username)
+	if err != nil {
+		return Recipe{}, err
+	}
+
+	// Verify ownership/access
+	var model RecipeModel
+	if err := r.db.Table("recipes").
+		Select("recipes.*").
+		Joins("JOIN users u ON u.id = recipes.user_id").
+		Where("u.id = ? AND recipes.id = ?", userID, recipeID).
+		First(&model).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return Recipe{}, sql.ErrNoRows
+		}
+		return Recipe{}, fmt.Errorf("get recipe for update: %w", err)
+	}
+
+	updates := map[string]any{
+		"updated_at": gorm.Expr("CURRENT_TIMESTAMP"),
+	}
+	if title != nil {
+		updates["title"] = strings.TrimSpace(*title)
+	}
+	if instructions != nil {
+		data, err := json.Marshal(*instructions)
+		if err != nil {
+			return Recipe{}, fmt.Errorf("marshal instructions: %w", err)
+		}
+		updates["instructions"] = string(data)
+	}
+	if category != nil {
+		if norm, ok := normalizeCategoryStrict(*category); ok {
+			updates["category"] = norm
+		} else {
+			return Recipe{}, ErrInvalidCategory
+		}
+	}
+	if len(updates) > 1 {
+		if err := r.db.Model(&RecipeModel{}).Where("id = ?", model.ID).Updates(updates).Error; err != nil {
+			return Recipe{}, fmt.Errorf("update recipe: %w", err)
+		}
+	}
+
+	var refreshed RecipeModel
+	if err := r.db.First(&refreshed, model.ID).Error; err != nil {
+		return Recipe{}, fmt.Errorf("reload recipe: %w", err)
+	}
+	recipe, err := refreshed.toRecipe()
+	if err != nil {
+		return Recipe{}, err
+	}
+	return recipe, nil
 }
 
 func (r *RecipeRepository) updateUserPassword(userID uint, newPassword string) error {
@@ -740,6 +823,14 @@ func (r *RecipeRepository) SaveRecipeForUser(username, slug string, recipe Recip
 	if err != nil {
 		return fmt.Errorf("marshal instructions: %w", err)
 	}
+	ingredientsBytes, err := json.Marshal(recipe.Ingredients)
+	if err != nil {
+		return fmt.Errorf("marshal ingredients: %w", err)
+	}
+	parsedBytes, err := json.Marshal(recipe.ParsedIngredients)
+	if err != nil {
+		return fmt.Errorf("marshal parsed ingredients: %w", err)
+	}
 
 	tx := r.db.Begin()
 	if err := tx.Error; err != nil {
@@ -754,13 +845,16 @@ func (r *RecipeRepository) SaveRecipeForUser(username, slug string, recipe Recip
 	}()
 
 	model := RecipeModel{
+		UserID:       userID,
 		Slug:         slug,
 		Title:        recipe.Title,
-		Category:     recipe.Category,
+		Category:     normalizeCategoryOrOther(recipe.Category),
 		CookTime:     recipe.CookTime,
 		Date:         recipe.Date,
 		Image:        recipe.Image,
 		Instructions: string(instructionsBytes),
+		Ingredients:  string(ingredientsBytes),
+		ParsedJSON:   string(parsedBytes),
 		PrepTime:     recipe.PrepTime,
 		Servings:     recipe.Servings,
 		TotalTime:    recipe.TotalTime,
@@ -769,40 +863,38 @@ func (r *RecipeRepository) SaveRecipeForUser(username, slug string, recipe Recip
 	}
 
 	assignments := clause.Assignments(map[string]any{
-		"title":        recipe.Title,
-		"category":     recipe.Category,
-		"cook_time":    recipe.CookTime,
-		"date":         recipe.Date,
-		"image":        recipe.Image,
-		"instructions": string(instructionsBytes),
-		"prep_time":    recipe.PrepTime,
-		"servings":     recipe.Servings,
-		"total_time":   recipe.TotalTime,
-		"link":         recipe.Link,
-		"original_url": recipe.OriginalURL,
-		"updated_at":   gorm.Expr("CURRENT_TIMESTAMP"),
+		"title":              recipe.Title,
+		"category":           normalizeCategoryOrOther(recipe.Category),
+		"cook_time":          recipe.CookTime,
+		"date":               recipe.Date,
+		"image":              recipe.Image,
+		"instructions":       string(instructionsBytes),
+		"ingredients":        string(ingredientsBytes),
+		"parsed_ingredients": string(parsedBytes),
+		"prep_time":          recipe.PrepTime,
+		"servings":           recipe.Servings,
+		"total_time":         recipe.TotalTime,
+		"link":               recipe.Link,
+		"original_url":       recipe.OriginalURL,
+		"updated_at":         gorm.Expr("CURRENT_TIMESTAMP"),
 	})
 
 	if err = tx.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "slug"}},
+		Columns:   []clause.Column{{Name: "user_id"}, {Name: "slug"}},
 		DoUpdates: assignments,
 	}).Create(&model).Error; err != nil {
 		return fmt.Errorf("save recipe: %w", err)
 	}
 
 	if model.ID == 0 {
-		if err = tx.Where("slug = ?", slug).First(&model).Error; err != nil {
+		if err = tx.Where("user_id = ? AND slug = ?", userID, slug).First(&model).Error; err != nil {
 			return fmt.Errorf("fetch recipe id: %w", err)
 		}
 	}
 
-	if err = r.storeRecipeIngredientsTx(tx, model.ID, recipe.Ingredients); err != nil {
-		return err
-	}
+	// Ingredients now persisted on the recipe row as JSON
 
-	if err = r.linkUserToRecipeTx(tx, userID, model.ID); err != nil {
-		return err
-	}
+	// Legacy user_recipes link omitted in user-owned model
 
 	return nil
 }
@@ -818,12 +910,7 @@ func (r *RecipeRepository) GetRecipe(username, slug string) (Recipe, error) {
 	}
 
 	var model RecipeModel
-	if err := r.db.Table("recipes").
-		Select("recipes.*").
-		Joins("JOIN user_recipes ur ON ur.recipe_id = recipes.id").
-		Joins("JOIN users u ON u.id = ur.user_id").
-		Where("u.username = ? AND recipes.slug = ?", username, slug).
-		First(&model).Error; err != nil {
+	if err := r.db.Where("user_id = ? AND slug = ?", userID, slug).First(&model).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return Recipe{}, sql.ErrNoRows
 		}
@@ -835,13 +922,6 @@ func (r *RecipeRepository) GetRecipe(username, slug string) (Recipe, error) {
 		return Recipe{}, err
 	}
 
-	notePtr, noteErr := r.getUserNote(userID, model.ID)
-	if noteErr != nil {
-		return Recipe{}, noteErr
-	}
-	if notePtr != nil {
-		recipe.Note = notePtr
-	}
 	if fav, favErr := r.isFavorite(userID, model.ID); favErr == nil {
 		recipe.IsFavorite = fav
 	} else {
@@ -861,18 +941,12 @@ func (r *RecipeRepository) ListRecipes(username, category string) ([]Recipe, err
 		return nil, err
 	}
 
-	query := r.db.Table("recipes").
-		Select("recipes.*").
-		Joins("JOIN user_recipes ur ON ur.recipe_id = recipes.id").
-		Joins("JOIN users u ON u.id = ur.user_id").
-		Where("u.username = ?", username)
-
-	if category != "" {
-		query = query.Where("recipes.category = ?", category)
-	}
-
 	var models []RecipeModel
-	if err := query.Order("ur.created_at DESC").Find(&models).Error; err != nil {
+	if err := r.db.Table("recipes").
+		Select("recipes.*").
+		Where("recipes.user_id = ?", userID).
+		Order("recipes.created_at DESC").
+		Find(&models).Error; err != nil {
 		return nil, fmt.Errorf("list recipes: %w", err)
 	}
 
@@ -882,13 +956,7 @@ func (r *RecipeRepository) ListRecipes(username, category string) ([]Recipe, err
 		if err != nil {
 			return nil, err
 		}
-		notePtr, noteErr := r.getUserNote(userID, model.ID)
-		if noteErr != nil {
-			return nil, noteErr
-		}
-		if notePtr != nil {
-			recipe.Note = notePtr
-		}
+
 		if fav, favErr := r.isFavorite(userID, model.ID); favErr != nil {
 			return nil, favErr
 		} else {
@@ -915,11 +983,9 @@ func (r *RecipeRepository) SearchRecipes(username, term string) ([]Recipe, error
 	var models []RecipeModel
 	if err := r.db.Table("recipes").
 		Select("recipes.*").
-		Joins("JOIN user_recipes ur ON ur.recipe_id = recipes.id").
-		Joins("JOIN users u ON u.id = ur.user_id").
-		Where("u.username = ?", username).
+		Where("recipes.user_id = ?", userID).
 		Where("LOWER(recipes.title) LIKE ?", likeTerm).
-		Order("ur.created_at DESC").
+		Order("recipes.created_at DESC").
 		Find(&models).Error; err != nil {
 		return nil, fmt.Errorf("search recipes: %w", err)
 	}
@@ -930,13 +996,7 @@ func (r *RecipeRepository) SearchRecipes(username, term string) ([]Recipe, error
 		if err != nil {
 			return nil, err
 		}
-		notePtr, noteErr := r.getUserNote(userID, model.ID)
-		if noteErr != nil {
-			return nil, noteErr
-		}
-		if notePtr != nil {
-			recipe.Note = notePtr
-		}
+
 		if fav, favErr := r.isFavorite(userID, model.ID); favErr != nil {
 			return nil, favErr
 		} else {
@@ -962,8 +1022,7 @@ func (r *RecipeRepository) ListFavoriteRecipes(username string) ([]Recipe, error
 	if err := r.db.Table("recipes").
 		Select("recipes.*").
 		Joins("JOIN favorites f ON f.recipe_id = recipes.id").
-		Joins("JOIN users u ON u.id = f.user_id").
-		Where("u.username = ?", username).
+		Where("f.user_id = ? AND recipes.user_id = ?", userID, userID).
 		Order("f.created_at DESC").
 		Find(&models).Error; err != nil {
 		if isNoSuchTableError(err) {
@@ -980,19 +1039,12 @@ func (r *RecipeRepository) ListFavoriteRecipes(username string) ([]Recipe, error
 		}
 		recipe.OriginalServings = recipe.Servings
 
-		ingredientDisplays, parsedIngredients, err := r.getRecipeIngredients(model.ID)
-		if err != nil {
-			return nil, err
+		// Populate ingredients from JSON columns
+		if strings.TrimSpace(model.Ingredients) != "" {
+			_ = json.Unmarshal([]byte(model.Ingredients), &recipe.Ingredients)
 		}
-		recipe.Ingredients = ingredientDisplays
-		recipe.ParsedIngredients = parsedIngredients
-
-		notePtr, noteErr := r.getUserNote(userID, model.ID)
-		if noteErr != nil {
-			return nil, noteErr
-		}
-		if notePtr != nil {
-			recipe.Note = notePtr
+		if strings.TrimSpace(model.ParsedJSON) != "" {
+			_ = json.Unmarshal([]byte(model.ParsedJSON), &recipe.ParsedIngredients)
 		}
 		recipe.IsFavorite = true
 		recipes = append(recipes, recipe)
@@ -1001,72 +1053,189 @@ func (r *RecipeRepository) ListFavoriteRecipes(username string) ([]Recipe, error
 	return recipes, nil
 }
 
-func convertIngredientModel(m IngredientModel) IngredientDetail {
-	detail := IngredientDetail{
-		Description:    strings.TrimSpace(m.Description),
-		BaseAmountText: strings.TrimSpace(m.AmountText),
+func (r *RecipeRepository) GetRecipeByID(username string, recipeID uint) (Recipe, error) {
+	if username == "" {
+		return Recipe{}, errors.New("username is required")
 	}
 
-	if m.AmountValue != nil {
-		base := *m.AmountValue
-		detail.BaseAmountValue = floatPtr(base)
-		detail.AmountValue = floatPtr(base)
-		detail.AmountText = formatAmount(base)
-	} else if detail.BaseAmountText != "" {
-		detail.AmountText = detail.BaseAmountText
+	userID, err := r.getUserID(username)
+	if err != nil {
+		return Recipe{}, err
 	}
 
-	if detail.AmountText == "" {
-		detail.Display = strings.TrimSpace(detail.Description)
+	var model RecipeModel
+	if err := r.db.Where("id = ? AND user_id = ?", recipeID, userID).First(&model).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return Recipe{}, sql.ErrNoRows
+		}
+		return Recipe{}, fmt.Errorf("get recipe: %w", err)
+	}
+
+	recipe, err := model.toRecipe()
+	if err != nil {
+		return Recipe{}, err
+	}
+
+	if fav, favErr := r.isFavorite(userID, model.ID); favErr == nil {
+		recipe.IsFavorite = fav
 	} else {
-		detail.Display = composeDisplay(detail.AmountText, detail.Description)
+		return Recipe{}, favErr
 	}
 
-	if detail.Display == "" && detail.BaseAmountText != "" {
-		detail.Display = strings.TrimSpace(detail.BaseAmountText)
-	}
-
-	return detail
+	return recipe, nil
 }
 
-func (r *RecipeRepository) storeRecipeIngredientsTx(tx *gorm.DB, recipeID uint, raw []string) error {
-	if err := tx.Where("recipe_id = ?", recipeID).Delete(&IngredientModel{}).Error; err != nil {
-		if isNoSuchTableError(err) {
-			return nil
-		}
-		return fmt.Errorf("clear ingredients: %w", err)
+func (r *RecipeRepository) SetFavoriteByID(username string, recipeID uint, favorite bool) error {
+	userID, err := r.getUserID(username)
+	if err != nil {
+		return err
 	}
 
-	if len(raw) == 0 {
+	// Ensure the recipe belongs to the user (owned or linked)
+	var cnt int64
+	if err := r.db.Model(&RecipeModel{}).Where("id = ? AND user_id = ?", recipeID, userID).Count(&cnt).Error; err != nil {
+		return fmt.Errorf("check ownership: %w", err)
+	}
+	if cnt == 0 {
+		return sql.ErrNoRows
+	}
+
+	if favorite {
+		fav := FavoriteModel{UserID: userID, RecipeID: recipeID}
+		if err := r.db.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "user_id"}, {Name: "recipe_id"}},
+			DoNothing: true,
+		}).Create(&fav).Error; err != nil {
+			if isNoSuchTableError(err) {
+				return nil
+			}
+			return fmt.Errorf("set favorite: %w", err)
+		}
 		return nil
 	}
 
-	for idx, line := range raw {
-		amountValue, amountText, description := parseIngredientString(line)
-		if strings.TrimSpace(description) == "" && (amountValue == nil || *amountValue == 0) {
-			continue
+	if err := r.db.Where("user_id = ? AND recipe_id = ?", userID, recipeID).
+		Delete(&FavoriteModel{}).Error; err != nil {
+		if isNoSuchTableError(err) {
+			return nil
 		}
-		// Normalize amount text to ASCII fractions when we parsed a numeric value
-		normalizedAmountText := amountText
-		if amountValue != nil {
-			normalizedAmountText = formatAmount(*amountValue)
-		}
-		model := IngredientModel{
-			RecipeID:    recipeID,
-			Position:    idx,
-			AmountText:  normalizedAmountText,
-			Description: description,
-		}
-		if amountValue != nil {
-			model.AmountValue = amountValue
-		}
-
-		if err := tx.Create(&model).Error; err != nil {
-			return fmt.Errorf("insert ingredient: %w", err)
-		}
+		return fmt.Errorf("remove favorite: %w", err)
 	}
 
 	return nil
+}
+
+func (r *RecipeRepository) DeleteRecipeByID(username string, recipeID uint) error {
+	if username == "" {
+		return errors.New("username is required")
+	}
+
+	userID, err := r.getUserID(username)
+	if err != nil {
+		return err
+	}
+	var model RecipeModel
+	if err := r.db.Where("user_id = ? AND id = ?", userID, recipeID).First(&model).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return fmt.Errorf("lookup recipe: %w", err)
+	}
+	if err := r.db.Where("user_id = ? AND recipe_id = ?", userID, model.ID).Delete(&FavoriteModel{}).Error; err != nil {
+		if !isNoSuchTableError(err) {
+			return fmt.Errorf("delete favorites: %w", err)
+		}
+	}
+	if err := r.db.Delete(&RecipeModel{}, model.ID).Error; err != nil {
+		return fmt.Errorf("delete recipe: %w", err)
+	}
+	return nil
+}
+
+// composeDisplayWithUnit builds a display string from amount, unit, and description.
+// It preserves existing behavior when fields are empty, and inserts spaces appropriately.
+func composeDisplayWithUnit(amountText, unit, description string) string {
+	amount := strings.TrimSpace(amountText)
+	unit = strings.TrimSpace(unit)
+	desc := strings.TrimSpace(description)
+
+	parts := make([]string, 0, 3)
+	if amount != "" {
+		parts = append(parts, amount)
+	}
+	if unit != "" {
+		parts = append(parts, unit)
+	}
+	if desc != "" {
+		parts = append(parts, desc)
+	}
+	return strings.TrimSpace(strings.Join(parts, " "))
+}
+
+// extractUnitFromDescription attempts to parse a unit token from the start of the description.
+// Returns the unit (lowercased, as encountered) and the remaining description without the unit and optional "of".
+func extractUnitFromDescription(description string) (string, string) {
+	desc := strings.TrimSpace(description)
+	if desc == "" {
+		return "", ""
+	}
+
+	// Tokenize description
+	fields := strings.Fields(desc)
+	if len(fields) == 0 {
+		return "", desc
+	}
+
+	// Known units (one and two-word variants)
+	oneWord := map[string]struct{}{
+		"tsp": {}, "teaspoon": {}, "teaspoons": {},
+		"tbsp": {}, "tablespoon": {}, "tablespoons": {},
+		"cup": {}, "cups": {}, "c": {},
+		"pint": {}, "pints": {}, "pt": {},
+		"quart": {}, "quarts": {}, "qt": {},
+		"gallon": {}, "gallons": {}, "gal": {},
+		"ml": {}, "milliliter": {}, "milliliters": {},
+		"l": {}, "liter": {}, "liters": {},
+		"oz": {}, "ounce": {}, "ounces": {},
+		"lb": {}, "lbs": {}, "pound": {}, "pounds": {},
+		"g": {}, "gram": {}, "grams": {},
+		"kg": {}, "kilogram": {}, "kilograms": {},
+		"pinch": {}, "dash": {},
+		"clove": {}, "cloves": {},
+		"can": {}, "cans": {},
+		"package": {}, "packages": {},
+		"stick": {}, "sticks": {},
+	}
+
+	twoWord := map[string]struct{}{
+		"fl oz": {}, "fluid ounce": {}, "fluid ounces": {},
+	}
+
+	// Attempt two-word unit first
+	if len(fields) >= 2 {
+		candidate := strings.ToLower(strings.TrimSpace(fields[0] + " " + fields[1]))
+		if _, ok := twoWord[candidate]; ok {
+			unit := candidate
+			remain := strings.TrimSpace(strings.Join(fields[2:], " "))
+			if strings.HasPrefix(strings.ToLower(remain), "of ") {
+				remain = strings.TrimSpace(remain[3:])
+			}
+			return unit, remain
+		}
+	}
+
+	// Fallback to one-word unit
+	first := strings.ToLower(fields[0])
+	if _, ok := oneWord[first]; ok {
+		unit := fields[0]
+		remain := strings.TrimSpace(strings.Join(fields[1:], " "))
+		if strings.HasPrefix(strings.ToLower(remain), "of ") {
+			remain = strings.TrimSpace(remain[3:])
+		}
+		return strings.ToLower(unit), remain
+	}
+
+	return "", desc
 }
 
 func parseIngredientString(input string) (*float64, string, string) {
@@ -1114,183 +1283,45 @@ func parseIngredientString(input string) (*float64, string, string) {
 	return nil, "", trimmed
 }
 
-func containsNumeric(token string) bool {
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return false
-	}
-	for _, r := range token {
-		if unicode.IsDigit(r) || r == '/' || r == '.' {
-			return true
-		}
-		if isUnicodeFraction(r) {
-			return true
-		}
-	}
-	return false
-}
+// Deprecated parsing helpers retained for potential future use
+func containsNumeric(token string) bool { return false }
 
-func isUnicodeFraction(r rune) bool {
-	switch r {
-	case '¼', '½', '¾', '⅐', '⅑', '⅒', '⅓', '⅔', '⅕', '⅖', '⅗', '⅘', '⅙', '⅚', '⅛', '⅜', '⅝', '⅞':
-		return true
-	default:
-		return false
-	}
-}
+func isUnicodeFraction(r rune) bool { return false }
 
-func parseAmountTokens(tokens []string) (float64, bool) {
-	if len(tokens) == 0 {
-		return 0, false
-	}
+func parseAmountTokens(tokens []string) (float64, bool) { return 0, false }
 
-	if len(tokens) == 1 {
-		return parseSingleToken(tokens[0])
-	}
+func parseSingleToken(token string) (float64, bool) { return 0, false }
 
-	if len(tokens) == 2 {
-		first, ok := parseSingleToken(tokens[0])
-		if !ok {
-			return 0, false
-		}
-		second, ok := parseSingleToken(tokens[1])
-		if ok && strings.Contains(tokens[1], "/") {
-			return first + second, true
-		}
-		if ok && strings.ContainsRune(tokens[1], '.') {
-			return first + second, true
-		}
-		if ok && isUnicodeFraction([]rune(tokens[1])[0]) {
-			return first + second, true
-		}
-		return first, true
-	}
-
-	// If more than two tokens, only parse the first value.
-	return parseSingleToken(tokens[0])
-}
-
-func parseSingleToken(token string) (float64, bool) {
-	normalized := strings.Trim(token, ",()")
-	if normalized == "" {
-		return 0, false
-	}
-	// Handle hyphenated mixed fractions like "1-1/2"
-	if hyphenMixedRe := regexp.MustCompile(`^\s*([0-9]+(?:\.[0-9]+)?)\s*-\s*([0-9]+)\s*/\s*([0-9]+)\s*$`); hyphenMixedRe.MatchString(normalized) {
-		matches := hyphenMixedRe.FindStringSubmatch(normalized)
-		if len(matches) == 4 {
-			whole, err1 := strconv.ParseFloat(matches[1], 64)
-			num, err2 := strconv.ParseFloat(matches[2], 64)
-			den, err3 := strconv.ParseFloat(matches[3], 64)
-			if err1 == nil && err2 == nil && err3 == nil && den != 0 {
-				return whole + (num / den), true
-			}
-		}
-	}
-	// Handle tokens that combine a whole number with a unicode fraction, e.g., "1½", "2¾"
-	// We scan the token to extract any leading numeric part and a unicode fraction rune.
-	{
-		var fractionRune rune
-		var wholePartBuilder strings.Builder
-		for _, r := range normalized {
-			if isUnicodeFraction(r) {
-				fractionRune = r
-				continue
-			}
-			if unicode.IsDigit(r) || r == '.' {
-				wholePartBuilder.WriteRune(r)
-				continue
-			}
-			// Ignore simple delimiters occasionally embedded with the amount
-			if r == ' ' || r == '-' || r == '_' {
-				continue
-			}
-			// Non-numeric character found; keep scanning in case a fraction rune appears later
-		}
-		if fractionRune != 0 {
-			if frac, ok := unicodeFractionToFloat(fractionRune); ok {
-				whole := 0.0
-				if wholePartBuilder.Len() > 0 {
-					if w, err := strconv.ParseFloat(wholePartBuilder.String(), 64); err == nil {
-						whole = w
-					}
-				}
-				return whole + frac, true
-			}
-		}
-	}
-
-	if len(normalized) == 1 && isUnicodeFraction([]rune(normalized)[0]) {
-		return unicodeFractionToFloat([]rune(normalized)[0])
-	}
-
-	if strings.Contains(normalized, "/") {
-		parts := strings.Split(normalized, "/")
-		if len(parts) != 2 {
-			return 0, false
-		}
-		num, err1 := strconv.ParseFloat(parts[0], 64)
-		den, err2 := strconv.ParseFloat(parts[1], 64)
-		if err1 != nil || err2 != nil || den == 0 {
-			return 0, false
-		}
-		return num / den, true
-	}
-
-	value, err := strconv.ParseFloat(normalized, 64)
-	if err != nil {
-		return 0, false
-	}
-	return value, true
-}
-
-func unicodeFractionToFloat(r rune) (float64, bool) {
-	switch r {
-	case '¼':
-		return 0.25, true
-	case '½':
-		return 0.5, true
-	case '¾':
-		return 0.75, true
-	case '⅓':
-		return 1.0 / 3.0, true
-	case '⅔':
-		return 2.0 / 3.0, true
-	case '⅕':
-		return 0.2, true
-	case '⅖':
-		return 0.4, true
-	case '⅗':
-		return 0.6, true
-	case '⅘':
-		return 0.8, true
-	case '⅙':
-		return 1.0 / 6.0, true
-	case '⅚':
-		return 5.0 / 6.0, true
-	case '⅛':
-		return 0.125, true
-	case '⅜':
-		return 0.375, true
-	case '⅝':
-		return 0.625, true
-	case '⅞':
-		return 0.875, true
-	default:
-		return 0, false
-	}
-}
+func unicodeFractionToFloat(r rune) (float64, bool) { return 0, false }
 
 func (r *RecipeRepository) DeleteRecipe(username, slug string) error {
 	if username == "" {
 		return errors.New("username is required")
 	}
 
-	if err := r.db.Where("user_id = (SELECT id FROM users WHERE username = ?) AND recipe_id = (SELECT id FROM recipes WHERE slug = ?)", username, slug).
-		Delete(&UserRecipeModel{}).Error; err != nil {
-		return fmt.Errorf("delete recipe link: %w", err)
+	userID, err := r.getUserID(username)
+	if err != nil {
+		return err
+	}
+	// Find recipe id first
+	var model RecipeModel
+	if err := r.db.Where("user_id = ? AND slug = ?", userID, slug).First(&model).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return fmt.Errorf("lookup recipe: %w", err)
+	}
+	// Delete favorites and notes scoped to this user and recipe
+	if err := r.db.Where("user_id = ? AND recipe_id = ?", userID, model.ID).Delete(&FavoriteModel{}).Error; err != nil {
+		if !isNoSuchTableError(err) {
+			return fmt.Errorf("delete favorites: %w", err)
+		}
 	}
 
+	// Delete recipe row (ingredients cascade via FK in SQL)
+	if err := r.db.Delete(&RecipeModel{}, model.ID).Error; err != nil {
+		return fmt.Errorf("delete recipe: %w", err)
+	}
 	return nil
 }
 
@@ -1300,10 +1331,10 @@ func (r *RecipeRepository) CountRecipes(username string) (int64, error) {
 	}
 
 	var count int64
-	if err := r.db.Model(&UserRecipeModel{}).
-		Joins("JOIN users ON users.id = user_recipes.user_id").
-		Where("users.username = ?", username).
-		Count(&count).Error; err != nil {
+	if err := r.db.Table("recipes").
+		Select("COUNT(*)").
+		Where("user_id = (SELECT id FROM users WHERE username = ?)", username).
+		Scan(&count).Error; err != nil {
 		return 0, fmt.Errorf("count recipes: %w", err)
 	}
 
@@ -1318,8 +1349,7 @@ func (r *RecipeRepository) CategoryCounts(username string) ([]CategoryCount, err
 	var results []CategoryCount
 	if err := r.db.Table("recipes").
 		Select("COALESCE(recipes.category, '') AS category, COUNT(*) AS count").
-		Joins("JOIN user_recipes ur ON ur.recipe_id = recipes.id").
-		Joins("JOIN users u ON u.id = ur.user_id").
+		Joins("JOIN users u ON u.id = recipes.user_id").
 		Where("u.username = ?", username).
 		Group("recipes.category").
 		Order("LOWER(recipes.category)").
@@ -1330,29 +1360,10 @@ func (r *RecipeRepository) CategoryCounts(username string) ([]CategoryCount, err
 	return results, nil
 }
 
-func (r *RecipeRepository) getRecipeIngredients(recipeID uint) ([]string, []IngredientDetail, error) {
-	var rows []IngredientModel
-	if err := r.db.Where("recipe_id = ?", recipeID).Order("position ASC").Find(&rows).Error; err != nil {
-		if isNoSuchTableError(err) {
-			return []string{}, []IngredientDetail{}, nil
-		}
-		return nil, nil, fmt.Errorf("fetch ingredients: %w", err)
-	}
-
-	displays := make([]string, 0, len(rows))
-	details := make([]IngredientDetail, 0, len(rows))
-	for _, row := range rows {
-		detail := convertIngredientModel(row)
-		details = append(details, detail)
-		displays = append(displays, detail.Display)
-	}
-
-	return displays, details, nil
-}
-
 func (m RecipeModel) toRecipe() (Recipe, error) {
 	var recipe Recipe
 
+	recipe.ID = m.ID
 	recipe.Category = m.Category
 	recipe.CookTime = m.CookTime
 	recipe.Date = m.Date
@@ -1367,6 +1378,16 @@ func (m RecipeModel) toRecipe() (Recipe, error) {
 	if len(m.Instructions) > 0 {
 		if err := json.Unmarshal([]byte(m.Instructions), &recipe.Instructions); err != nil {
 			return Recipe{}, fmt.Errorf("unmarshal instructions: %w", err)
+		}
+	}
+	if strings.TrimSpace(m.Ingredients) != "" {
+		if err := json.Unmarshal([]byte(m.Ingredients), &recipe.Ingredients); err != nil {
+			return Recipe{}, fmt.Errorf("unmarshal ingredients: %w", err)
+		}
+	}
+	if strings.TrimSpace(m.ParsedJSON) != "" {
+		if err := json.Unmarshal([]byte(m.ParsedJSON), &recipe.ParsedIngredients); err != nil {
+			return Recipe{}, fmt.Errorf("unmarshal parsed ingredients: %w", err)
 		}
 	}
 

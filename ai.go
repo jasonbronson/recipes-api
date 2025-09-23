@@ -284,23 +284,24 @@ type ImageValidationRequest struct {
 }
 
 type Response struct {
-	ID                string   `json:"id"`
-	Object            string   `json:"object"`
-	Created           int64    `json:"created"`
-	Model             string   `json:"model"`
-	SystemFingerprint string   `json:"system_fingerprint"`
-	Choices           []Choice `json:"choices"`
-	Usage             Usage    `json:"usage"`
-	Title             string   `json:"title"`
-	Date              string   `json:"date"`
-	Image             string   `json:"image"`
-	PrepTime          int      `json:"prepTime"`
-	CookTime          int      `json:"cookTime"`
-	TotalTime         int      `json:"totalTime"`
-	Servings          int      `json:"servings"`
-	Category          string   `json:"category"`
-	Ingredients       []string `json:"ingredients"`
-	Instructions      []string `json:"instructions"`
+	ID                string             `json:"id"`
+	Object            string             `json:"object"`
+	Created           int64              `json:"created"`
+	Model             string             `json:"model"`
+	SystemFingerprint string             `json:"system_fingerprint"`
+	Choices           []Choice           `json:"choices"`
+	Usage             Usage              `json:"usage"`
+	Title             string             `json:"title"`
+	Date              string             `json:"date"`
+	Image             string             `json:"image"`
+	PrepTime          int                `json:"prepTime"`
+	CookTime          int                `json:"cookTime"`
+	TotalTime         int                `json:"totalTime"`
+	Servings          int                `json:"servings"`
+	Category          string             `json:"category"`
+	Ingredients       []string           `json:"ingredients"`
+	ParsedIngredients []IngredientDetail `json:"parsedIngredients,omitempty"`
+	Instructions      []string           `json:"instructions"`
 }
 
 type Choice struct {

@@ -108,18 +108,63 @@ func processQueueItem(repo *RecipeRepository, item QueueModel) {
 	recipe, slug, err := getRecipe(item.URL)
 	if err != nil {
 		log.Printf("Queue: item %d failed to fetch recipe: %v", item.ID, err)
-		if markErr := repo.MarkQueueItemResult(item.ID, err); markErr != nil {
-			log.Printf("failed to mark queue item %d: %v", item.ID, markErr)
+		// Fallback: create a placeholder recipe so the user can see the item
+		title, fallbackSlug := FallbackTitleAndSlug(item.URL)
+		placeholder := Recipe{
+			Title:        title,
+			OriginalURL:  item.URL,
+			Category:     "",
+			Ingredients:  []string{},
+			Instructions: []string{},
+		}
+		if saveErr := repo.SaveRecipeForUser(username, fallbackSlug, placeholder); saveErr != nil {
+			log.Printf("Queue: item %d failed to save placeholder recipe: %v", item.ID, saveErr)
+			if markErr := repo.MarkQueueItemResult(item.ID, err); markErr != nil {
+				log.Printf("failed to mark queue item %d: %v", item.ID, markErr)
+			}
+			return
+		}
+		// Mark processed since we stored a placeholder successfully
+		recipeCache.Delete(singleRecipeCacheKey(username, fallbackSlug))
+		invalidateUserRecipeCaches(username)
+		if markErr := repo.MarkQueueItemResult(item.ID, nil); markErr != nil {
+			log.Printf("Queue: failed to finalize item %d after placeholder save: %v", item.ID, markErr)
 		}
 		return
 	}
 	recipe.Link = fmt.Sprintf("/recipes/%s/%s", recipe.Category, slug)
 
 	if !recipeIsComplete(recipe) {
-		err := fmt.Errorf("recipe data incomplete for %s", slug)
-		log.Printf("Queue: item %d invalid recipe: %v", item.ID, err)
-		if markErr := repo.MarkQueueItemResult(item.ID, err); markErr != nil {
-			log.Printf("failed to mark queue item %d: %v", item.ID, markErr)
+		// Save a minimal placeholder so the user has something (title/image/original URL)
+		log.Printf("Queue: item %d recipe incomplete; saving minimal placeholder", item.ID)
+		fallbackTitle, fallbackSlug := FallbackTitleAndSlug(item.URL)
+		minimalSlug := slug
+		if minimalSlug == "" {
+			minimalSlug = fallbackSlug
+		}
+		minimalTitle := recipe.Title
+		if minimalTitle == "" {
+			minimalTitle = fallbackTitle
+		}
+		placeholder := Recipe{
+			Title:        minimalTitle,
+			Image:        recipe.Image,
+			OriginalURL:  item.URL,
+			Category:     recipe.Category,
+			Ingredients:  []string{},
+			Instructions: []string{},
+		}
+		if saveErr := repo.SaveRecipeForUser(username, minimalSlug, placeholder); saveErr != nil {
+			log.Printf("Queue: item %d failed to save minimal placeholder: %v", item.ID, saveErr)
+			if markErr := repo.MarkQueueItemResult(item.ID, saveErr); markErr != nil {
+				log.Printf("failed to mark queue item %d: %v", item.ID, markErr)
+			}
+			return
+		}
+		recipeCache.Delete(singleRecipeCacheKey(username, minimalSlug))
+		invalidateUserRecipeCaches(username)
+		if markErr := repo.MarkQueueItemResult(item.ID, nil); markErr != nil {
+			log.Printf("Queue: failed to finalize item %d after minimal placeholder save: %v", item.ID, markErr)
 		}
 		return
 	}

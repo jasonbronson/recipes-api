@@ -65,7 +65,7 @@ func attachMiddleware(router *gin.Engine) {
 			return
 		}
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
 
 		if c.Request.Method == "OPTIONS" {
@@ -94,12 +94,17 @@ func registerRoutes(router *gin.Engine) {
 	router.POST("/save-recipe", handleSaveRecipe)
 	router.GET("/get-recipe/:name", handleGetRecipe)
 	router.DELETE("/recipes/:slug", handleDeleteRecipe)
+
+	// edit recipes
+	router.DELETE("/recipes/id/:id", handleDeleteRecipe)
+	router.PATCH("/recipes/id/:id", handlePatchRecipe)
+
+	// edit favorites
+	router.POST("/recipes/id/:id/favorite", handleFavoriteRecipe)
+	router.DELETE("/recipes/id/:id/favorite", handleUnfavoriteRecipe)
+
 	router.GET("/get-recipes", handleListRecipes)
 	router.GET("/search-recipes", handleSearchRecipes)
 	router.GET("/categories", handleGetCategories)
 	router.GET("/favorites", handleListFavorites)
-	router.POST("/recipes/:slug/notes", handleUpsertRecipeNote)
-	router.DELETE("/recipes/:slug/notes", handleDeleteRecipeNote)
-	router.POST("/recipes/:slug/favorite", handleFavoriteRecipe)
-	router.DELETE("/recipes/:slug/favorite", handleUnfavoriteRecipe)
 }
