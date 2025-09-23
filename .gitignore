@@ -2,3 +2,5 @@
 tmp
 credentials.json
 config.yml
+data/*
+.DS_Store
