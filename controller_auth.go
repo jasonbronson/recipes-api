@@ -18,6 +18,7 @@ func handleRegister(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&request); err != nil {
+		log.Printf("Register JSON binding error: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "username and password are required"})
 		return
 	}
@@ -27,6 +28,7 @@ func handleRegister(c *gin.Context) {
 		if strings.Contains(err.Error(), "username already exists") {
 			status = http.StatusConflict
 		}
+		log.Printf("Register error for username %s: %v", request.Username, err)
 		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
@@ -41,17 +43,18 @@ func handleLogin(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&request); err != nil {
-		log.Printf("Error binding JSON: %v", err)
+		log.Printf("Login JSON binding error: %v, request body: %+v", err, c.Request.Body)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "username and password are required"})
 		return
 	}
 
 	if _, err := recipeRepo.AuthenticateUser(request.Username, request.Password); err != nil {
 		if strings.Contains(err.Error(), "invalid credentials") {
+			log.Printf("Login failed - invalid credentials for username: %s", request.Username)
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 			return
 		}
-		log.Printf("Error authenticating user %s: %v", request.Username, err)
+		log.Printf("Login error for username %s: %v", request.Username, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to authenticate"})
 		return
 	}
@@ -76,6 +79,7 @@ func handlePasswordResetRequest(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&request); err != nil {
+		log.Printf("Password reset request JSON binding error: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "username is required"})
 		return
 	}
@@ -83,6 +87,7 @@ func handlePasswordResetRequest(c *gin.Context) {
 	token, err := recipeRepo.CreatePasswordReset(request.Username, passwordResetTTL)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			log.Printf("Password reset requested for non-existent user: %s", request.Username)
 			c.JSON(http.StatusAccepted, gin.H{"message": "password reset email sent if account exists"})
 			return
 		}
@@ -107,16 +112,18 @@ func handlePasswordResetConfirm(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&request); err != nil {
+		log.Printf("Password reset confirm JSON binding error: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "token and password are required"})
 		return
 	}
 
 	if err := recipeRepo.ResetPasswordWithToken(request.Token, request.Password); err != nil {
 		if strings.Contains(err.Error(), "invalid or expired token") {
+			log.Printf("Password reset failed - invalid/expired token: %s", request.Token)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired token"})
 			return
 		}
-		log.Printf("Error resetting password: %v", err)
+		log.Printf("Error resetting password with token: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reset password"})
 		return
 	}
@@ -127,6 +134,7 @@ func handlePasswordResetConfirm(c *gin.Context) {
 func handleGetProfile(c *gin.Context) {
 	username, err := extractUsernameFromBearer(c.GetHeader("Authorization"))
 	if err != nil {
+		log.Printf("Profile fetch failed - Authorization error: %v, Header: %s", err, c.GetHeader("Authorization"))
 		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
 	}
@@ -134,6 +142,7 @@ func handleGetProfile(c *gin.Context) {
 	profile, err := recipeRepo.GetUserProfile(username)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			log.Printf("Profile not found for username: %s", username)
 			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 			return
 		}

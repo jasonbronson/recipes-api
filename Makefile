@@ -12,12 +12,12 @@ buildcloudflare:
 
 # Push recipe image with custom tag
 # Usage: make push-recipe TAG=your-tag-name
-push-recipe:
+push-tag:
 	docker push jbronson29/recipes:$(TAG)
 
 # Build and push recipe image with custom tag (also pushes latest)
 # Usage: make build-push-recipe TAG=your-tag-name
-build-push-recipe:
+build-push-tag:
 	docker buildx build --platform linux/amd64,linux/arm64 -f dockerfile.app -t jbronson29/recipes:$(TAG) --push .
 	docker buildx build --platform linux/amd64,linux/arm64 -f dockerfile.app -t jbronson29/recipes:latest --push .
 

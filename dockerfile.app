@@ -1,12 +1,16 @@
-FROM golang:1.22.5
+# syntax=docker/dockerfile:1.7
+FROM golang:1.22.5-bookworm
 
-# Build env
 ENV CGO_ENABLED=1 \
     CHROME_BIN=/usr/bin/chromium \
     CHROMIUM_BIN=/usr/bin/chromium \
     DEBIAN_FRONTEND=noninteractive
+ENV GOPROXY=https://proxy.golang.org,direct
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+WORKDIR /app
+# install system deps with an APT cache (reused across builds)
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
     bash \
     chromium \
     libnss3 \
@@ -37,12 +41,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-liberation \
     fonts-noto-color-emoji \
     gcc \
-    libc6-dev \
-    && rm -rf /var/lib/apt/lists/*
+    libc6-dev && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+# cache Go deps separately so they stick
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+
+# now copy sources
 COPY . .
-RUN go build -trimpath -ldflags="-s -w" -o /app/api .
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    go build -trimpath -ldflags="-s -w" -o /app/api .
 
 COPY ./schema.json /app/
 

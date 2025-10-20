@@ -1,1 +1,12 @@
 .env
+.git
+**/node_modules
+**/dist
+**/build
+**/bin
+**/obj
+*.log
+.DS_Store
+coverage*
+tmp/
+data

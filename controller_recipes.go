@@ -16,6 +16,7 @@ import (
 func handleSaveRecipe(c *gin.Context) {
 	username, err := extractUsernameFromBearer(c.GetHeader("Authorization"))
 	if err != nil {
+		log.Printf("Save recipe auth error: %v, Header: %s", err, c.GetHeader("Authorization"))
 		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
 	}
@@ -25,6 +26,7 @@ func handleSaveRecipe(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&request); err != nil {
+		log.Printf("Save recipe JSON binding error: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "url is required"})
 		return
 	}
@@ -132,6 +134,7 @@ func handleUnfavoriteRecipe(c *gin.Context) {
 func handleGetRecipe(c *gin.Context) {
 	username, err := usernameFromRequest(c)
 	if err != nil {
+		log.Printf("Get recipe auth error: %v, Header: %s", err, c.GetHeader("Authorization"))
 		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
 	}
@@ -139,6 +142,7 @@ func handleGetRecipe(c *gin.Context) {
 	if idStr := strings.TrimSpace(c.Query("id")); idStr != "" {
 		id64, convErr := strconv.ParseUint(idStr, 10, 64)
 		if convErr != nil || id64 == 0 {
+			log.Printf("Get recipe invalid ID error: %v, id: %s", convErr, idStr)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 			return
 		}
@@ -159,9 +163,11 @@ func handleGetRecipe(c *gin.Context) {
 		recipe, err := recipeRepo.GetRecipeByID(username, uint(id64))
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
+				log.Printf("Recipe not found for id=%d, user=%s", id64, username)
 				c.JSON(http.StatusNotFound, gin.H{"error": "recipe not found"})
 				return
 			}
+			log.Printf("Error fetching recipe id=%d for user=%s: %v", id64, username, err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch recipe"})
 			return
 		}
@@ -173,9 +179,10 @@ func handleGetRecipe(c *gin.Context) {
 		return
 	}
 
-	// Fallback to slug for backward compatibility if id query is absent
+	// Fallback to slug
 	slug := c.Param("name")
 	if strings.TrimSpace(slug) == "" {
+		log.Printf("Get recipe missing ID/slug error for user=%s", username)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "id is required"})
 		return
 	}
@@ -196,9 +203,11 @@ func handleGetRecipe(c *gin.Context) {
 	recipe, err := recipeRepo.GetRecipe(username, slug)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			log.Printf("Recipe not found for slug=%s, user=%s", slug, username)
 			c.JSON(http.StatusNotFound, gin.H{"error": "recipe not found"})
 			return
 		}
+		log.Printf("Error fetching recipe slug=%s for user=%s: %v", slug, username, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch recipe"})
 		return
 	}
@@ -212,6 +221,7 @@ func handleGetRecipe(c *gin.Context) {
 func handleDeleteRecipe(c *gin.Context) {
 	username, err := extractUsernameFromBearer(c.GetHeader("Authorization"))
 	if err != nil {
+		log.Printf("Delete recipe auth error: %v, Header: %s", err, c.GetHeader("Authorization"))
 		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
 	}
@@ -219,6 +229,7 @@ func handleDeleteRecipe(c *gin.Context) {
 	if idStr := strings.TrimSpace(c.Param("id")); idStr != "" {
 		id64, convErr := strconv.ParseUint(idStr, 10, 64)
 		if convErr != nil || id64 == 0 {
+			log.Printf("Delete recipe invalid ID error: %v, id: %s", convErr, idStr)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 			return
 		}
@@ -249,6 +260,7 @@ func handleDeleteRecipe(c *gin.Context) {
 func handlePatchRecipe(c *gin.Context) {
 	username, err := extractUsernameFromBearer(c.GetHeader("Authorization"))
 	if err != nil {
+		log.Printf("Patch recipe auth error: %v, Header: %s", err, c.GetHeader("Authorization"))
 		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
 	}
@@ -263,11 +275,13 @@ func handlePatchRecipe(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&request); err != nil {
+		log.Printf("Patch recipe JSON binding error: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body"})
 		return
 	}
 
 	if request.Title == nil && request.Instructions == nil && request.Category == nil {
+		log.Printf("Patch recipe no fields error for user=%s", username)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
 		return
 	}
@@ -320,6 +334,7 @@ func handlePatchRecipe(c *gin.Context) {
 func handleListRecipes(c *gin.Context) {
 	username, err := usernameFromRequest(c)
 	if err != nil {
+		log.Printf("List recipes auth error: %v, Header: %s", err, c.GetHeader("Authorization"))
 		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
 	}
@@ -339,6 +354,7 @@ func handleListRecipes(c *gin.Context) {
 func handleSearchRecipes(c *gin.Context) {
 	username, err := usernameFromRequest(c)
 	if err != nil {
+		log.Printf("Search recipes auth error: %v, Header: %s", err, c.GetHeader("Authorization"))
 		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
 	}
@@ -357,6 +373,7 @@ func handleSearchRecipes(c *gin.Context) {
 func handleGetCategories(c *gin.Context) {
 	username, err := usernameFromRequest(c)
 	if err != nil {
+		log.Printf("Get categories auth error: %v, Header: %s", err, c.GetHeader("Authorization"))
 		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
 	}
@@ -374,6 +391,7 @@ func handleGetCategories(c *gin.Context) {
 func handleListFavorites(c *gin.Context) {
 	username, err := usernameFromRequest(c)
 	if err != nil {
+		log.Printf("List favorites auth error: %v, Header: %s", err, c.GetHeader("Authorization"))
 		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
 	}
