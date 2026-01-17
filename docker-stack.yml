@@ -4,9 +4,9 @@ services:
   app:
     image: jbronson29/recipes:latest
     environment:
-      - JWT_SECRET=your-jwt-secret-key-here
-      - JWT_EXPIRATION=24h
-      - PORT=8080
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_EXPIRATION=${JWT_EXPIRATION}
+      - PORT=${PORT}
       - OPENAI_KEY=${OPENAI_KEY}
       - MAILGUN_DOMAIN=${MAILGUN_DOMAIN}
       - MAILGUN_API_KEY=${MAILGUN_API_KEY}
